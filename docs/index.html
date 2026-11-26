@@ -6,8 +6,8 @@
   <meta name="theme-color" content="#f2f0e8">
   <title>수담기원 · 19줄 바둑</title>
   <meta name="description" content="19줄 바둑판에서 친구와 실시간 대국을 두거나 봇과 연습하세요.">
-  <link rel="stylesheet" href="./style.css?v=19fit1">
-  <script type="module" src="./app.mjs?v=19fit1"></script>
+  <link rel="stylesheet" href="./style.css?v=score1">
+  <script type="module" src="./app.mjs?v=score1"></script>
 </head>
 <body>
   <svg class="symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
@@ -57,8 +57,16 @@
         <span class="board-meta"><span id="boardSize">19줄</span><span id="moves">0수</span></span>
       </div>
       <div class="seats" aria-label="대국자">
-        <div class="seat" id="seatBlack" aria-label="흑 대국자"><i class="stone black" aria-hidden="true"></i><b id="blackName">나</b></div>
-        <div class="seat" id="seatWhite" aria-label="백 대국자"><i class="stone white" aria-hidden="true"></i><b id="whiteName">연습 봇</b></div>
+        <div class="seat" id="seatBlack" aria-label="흑 대국자">
+          <i class="stone black" aria-hidden="true"></i><b id="blackName">나</b>
+          <strong class="score-total" id="blackTotal" hidden></strong><span class="score-vote" id="blackVote" hidden></span>
+          <small class="score-parts" id="blackParts" hidden></small>
+        </div>
+        <div class="seat" id="seatWhite" aria-label="백 대국자">
+          <i class="stone white" aria-hidden="true"></i><b id="whiteName">연습 봇</b>
+          <strong class="score-total" id="whiteTotal" hidden></strong><span class="score-vote" id="whiteVote" hidden></span>
+          <small class="score-parts" id="whiteParts" hidden></small>
+        </div>
       </div>
       <div class="match-status"><span id="signal" aria-hidden="true"></span><strong id="statusText" role="status">흑돌을 놓을 차례입니다.</strong></div>
       <p class="phase-note" id="phaseNote" hidden></p>
@@ -94,7 +102,7 @@
     <div class="modal-head"><h2 id="guideTitle">이용 안내</h2><button class="modal-close icon-btn" aria-label="닫기"><svg><use href="#i-close"/></svg></button></div>
     <div class="guide">
       <details name="guide" open><summary>착수와 따내기</summary><p>흑부터 교차점에 번갈아 돌을 놓습니다. 가로·세로로 이어진 무리의 활로를 모두 막으면 그 돌을 따냅니다. 자살수와 이전 판 모양을 반복하는 수는 금지됩니다.</p></details>
-      <details name="guide"><summary>계가와 사석</summary><p>둘 다 연속으로 한 수 쉬면 계가합니다. 죽은 무리를 눌러 표시하고 두 사람이 동의하면 종료됩니다. 살아 있는 돌과 둘러싼 빈 점을 합산하며 백에게 덤 6.5집을 줍니다. 의견이 다르면 대국을 재개하세요.</p></details>
+      <details name="guide"><summary>계가와 사석</summary><p>연속 두 번 쉬면 집을 확인합니다. 둘러싼 빈 점, 따낸 상대 돌, 합의한 상대 사석을 더합니다. 공배와 빅은 집에서 빼고 백은 덤 6.5집을 받습니다. 돌을 눌러 사석 표시를 바꾸고 두 사람이 동의하면 끝납니다. 이견이 있으면 대국을 재개하세요. 기존 면적 계가 대국은 살아 있는 돌과 집을 합산합니다.</p></details>
       <details name="guide"><summary>친구 초대와 재접속</summary><p>친구 대국에서 방을 만들고 초대 링크나 방 코드를 보내세요. 같은 브라우저로 다시 접속하면 계정과 현재 방이 복구됩니다.</p></details>
       <details name="guide"><summary>가상 코인 정산</summary><p>연습은 무료입니다. 친구 대국은 집 차이당 10코인, 기권은 10코인이며 패자의 잔액이 음수가 될 수 있습니다. 봇에게 이기면 쉬움·보통·어려움 순서로 5·10·20코인, 지면 10·10·20코인을 보유액까지만 정산합니다.</p></details>
       <details name="guide"><summary>키보드로 두기</summary><p>바둑판에 초점을 둔 뒤 방향키로 교차점을 이동하고 Enter 또는 스페이스로 선택하세요.</p></details>

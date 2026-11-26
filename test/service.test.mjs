@@ -12,7 +12,8 @@ function roomCommand(service, account, op, fields = {}, id) {
   return send(service, account, op, { code: room.code, revision: room.revision, ...fields }, id);
 }
 function action(service, account, type, fields = {}, id) {
-  return roomCommand(service, account, 'action', { action: { type, ...fields } }, id);
+  const vote = type === 'confirmScore' ? { scoringRule: service.view(account.accountId).room.scorePreview.rule } : {};
+  return roomCommand(service, account, 'action', { action: { type, ...vote, ...fields } }, id);
 }
 
 test('new rooms reject smaller sizes and legacy waiting rooms start on 19 lines', async () => {
@@ -53,6 +54,7 @@ for (const size of [9, 13]) {
     // Pre-update snapshots encode three empty points per 'A' in the superko history.
     const board = Array(size * size).fill(0);
     room.game = { ...room.game, size, board, history: ['A'.repeat(Math.ceil(board.length / 3))] };
+    delete room.game.scoringRule;
     room.game = applyAction(room.game, 1, { type: 'play', x: size - 1, y: size - 1 });
     const oldMatch = room.matchId;
 
@@ -77,6 +79,7 @@ for (const size of [9, 13]) {
     const next = reloaded.view(a.accountId);
     assert.equal(next.room.size, 19);
     assert.equal(next.room.game.size, 19);
+    assert.equal(next.room.game.scoringRule, 'territory-v1');
     assert.equal(next.room.game.board.length, 361);
     assert.notEqual(next.room.matchId, oldMatch);
     assert.deepEqual(next.profile, finished.profile);
@@ -156,6 +159,62 @@ test('two-pass scoring requires both humans and half points transfer exact coins
   assert.equal(service.view(a.accountId).profile.history[0].delta, -65);
 });
 
+test('the same six-point corner settles with the pinned rule, survives restart and transfers coins once', async () => {
+  const initial = createService();
+  const a = await connect(initial, '흑');
+  const b = await connect(initial, '백');
+  send(initial, a, 'create', { mode: 'friend' });
+  const code = initial.view(a.accountId).room.code;
+  send(initial, b, 'join', { code });
+  const blackMoves = [[3,0], [3,1], [3,2], [2,2], [1,2], [0,2], [8,8]];
+  const whiteMoves = [[10,10], [11,10], [12,10], [13,10], [14,10], [15,10]];
+  for (const legacy of [false, true]) {
+    const db = initial.snapshot();
+    if (legacy) delete db.rooms[code].game.scoringRule;
+    let service = createService(db);
+    for (let i = 0; i < blackMoves.length; i++) {
+      action(service, a, 'play', { x: blackMoves[i][0], y: blackMoves[i][1] });
+      if (whiteMoves[i]) action(service, b, 'play', { x: whiteMoves[i][0], y: whiteMoves[i][1] });
+    }
+    action(service, b, 'pass');
+    action(service, a, 'pass');
+    const proposal = service.view(a.accountId).room;
+    assert.deepEqual(proposal.scorePreview, service.view(b.accountId).room.scorePreview);
+    assert.deepEqual(proposal.scorePreview, service.snapshot().rooms[code].scorePreview);
+    service.view(a.accountId).room.scorePreview.black = -999;
+    assert.deepEqual(proposal.scorePreview, service.view(a.accountId).room.scorePreview);
+    const totals = legacy ? [13, 12.5] : [6, 6.5];
+    assert.deepEqual([proposal.scorePreview.black, proposal.scorePreview.white], totals);
+    assert.equal(proposal.scorePreview.rule, legacy ? 'area-v1' : 'territory-v1');
+    const vote = {
+      code, revision: proposal.revision, matchId: proposal.matchId,
+      action: { type: 'confirmScore', scorePreview: { black: 999, white: 0, winner: 1 } },
+    };
+    if (!legacy) {
+      assert.throws(() => send(service, a, 'action', vote), { code: 'scoring_rule_mismatch' });
+      assert.throws(() => send(service, a, 'action', { ...vote, action: { type: 'confirmScore', scoringRule: 'area-v1' } }), { code: 'scoring_rule_mismatch' });
+      assert.deepEqual(service.view(a.accountId).room.game.confirmed, []);
+      vote.action.scoringRule = proposal.scorePreview.rule;
+    }
+    send(service, a, 'action', vote);
+    service = createService(service.snapshot());
+    const finalVote = crypto.randomUUID();
+    send(service, b, 'action', vote, finalVote);
+    service = createService(service.snapshot());
+    send(service, b, 'action', vote, finalVote);
+    const black = service.view(a.accountId), white = service.view(b.accountId);
+    assert.equal(black.room.scorePreview, null);
+    assert.deepEqual([black.room.game.result.black, black.room.game.result.white], totals);
+    assert.equal(black.room.game.result.winner, legacy ? 1 : 2);
+    assert.equal(black.room.game.result.margin, 0.5);
+    assert.deepEqual([black.profile.coins, white.profile.coins], legacy ? [105, 95] : [95, 105]);
+    assert.equal(black.profile.history.length, 1);
+    assert.equal(white.profile.history.length, 1);
+    assert.equal(black.profile.history[0].scoringRule, proposal.scorePreview.rule);
+    assert.deepEqual([black.profile.history[0].black, black.profile.history[0].white], totals);
+  }
+});
+
 test('friend scores transfer the full amount and later bot losses cannot increase debt', async () => {
   const initial = createService();
   const a = await connect(initial, '여울');
@@ -190,7 +249,7 @@ test('a consent cannot cross a dead-group edit, a resumption, or a match boundar
   action(service, b, 'pass');
   action(service, a, 'pass');
   const proposal = service.view(a.accountId).room;
-  const consent = { code, revision: proposal.revision, matchId: proposal.matchId, action: { type: 'confirmScore' } };
+  const consent = { code, revision: proposal.revision, matchId: proposal.matchId, action: { type: 'confirmScore', scoringRule: proposal.scorePreview.rule } };
   action(service, b, 'markDead', { x: 1, y: 1 });
   assert.throws(() => send(service, a, 'action', consent), { code: 'stale_revision' });
   action(service, b, 'markDead', { x: 1, y: 1 });
@@ -274,7 +333,11 @@ for (const [difficulty, win, loss] of [['easy', 5, 10], ['normal', 10, 10], ['ha
       const db = structuredClone(baseline);
       const room = db.rooms[code];
       db.accounts[a.accountId].coins = coins;
-      if (humanWon) room.game = applyAction(room.game, 1, { type: 'play', x: 2, y: 2 });
+      if (humanWon) {
+        // Seven black stones enclose nine vacant corner points, and White has no prisoners or territory.
+        const moves = [[3,0], [10,10], [3,1], [11,10], [3,2], [12,10], [3,3], [13,10], [2,3], [14,10], [1,3], [15,10], [0,3]];
+        for (const [x,y] of moves) room.game = applyAction(room.game, room.game.turn, { type: 'play', x, y });
+      }
       for (let i = 0; i < 2; i++) room.game = applyAction(room.game, room.game.turn, { type: 'pass' });
       const service = createService(db);
       assert.deepEqual(service.pendingBots(), [code]);

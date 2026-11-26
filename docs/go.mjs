@@ -1,3 +1,5 @@
+import { territoryScoring } from './goscorer.mjs';
+
 // Board coordinates start at the upper left. Colors are 1 for black and 2 for white.
 const neighborTables = new Map();
 export const BOARD_SIZE = 19;
@@ -65,7 +67,7 @@ export function createGame(size = BOARD_SIZE) {
   return {
     size, board, turn: 1, phase: 'playing', moveNumber: 0, passes: 0,
     captures: { 1: 0, 2: 0 }, lastMove: null, dead: [], confirmed: [],
-    result: null, komi: 6.5, history: [positionKey(board)], resumeTurn: null,
+    result: null, komi: 6.5, scoringRule: 'territory-v1', history: [positionKey(board)], resumeTurn: null,
   };
 }
 
@@ -131,9 +133,118 @@ export function areaScore(game) {
   return { black, white, margin: Math.abs(black - white), winner: black > white ? 1 : 2, territory };
 }
 
+// A region around isolated stones which reaches every edge is the open exterior.
+// A lone wall across the board also divides that exterior into two broad three-edge
+// regions. Retain closed corner/edge pockets and genuinely narrow edge strips.
+function reviewExterior(board, size, territory, survivingColors) {
+  const adjacent = neighbors(size);
+  const seen = new Uint8Array(board.length);
+  const soleColor = survivingColors === 1 || survivingColors === 2;
+  const confined = new Map();
+  let groups;
+  function opponentConfined(owner) {
+    if (confined.has(owner)) return confined.get(owner);
+    groups ??= groupMap(board, adjacent);
+    const opposing = [...new Set(groups)].filter(group => group?.color === 3 - owner);
+    const allConfined = opposing.every(group => {
+      if (group.liberties.size !== 1) return false;
+      const [liberty] = group.liberties;
+      if (adjacent[liberty].some(n => !board[n] || (board[n] === group.color && groups[n] !== group))) return false;
+      return !group.stones.some(stone => adjacent[stone].some(n => groups[n]?.color === owner && groups[n].liberties.size === 1));
+    });
+    confined.set(owner, allConfined);
+    return allConfined;
+  }
+  let needsReview = false;
+  for (let start = 0; start < board.length; start++) {
+    if (board[start] || seen[start]) continue;
+    // Partition the mixed-color map by computed ownership as well as connectivity.
+    // An isolated pocket or a local secured shape beside open dame keeps its score.
+    const claimant = soleColor ? survivingColors : territory[start];
+    const inClaim = point => !board[point] && (soleColor || territory[point] === claimant);
+    const region = [start];
+    seen[start] = 1;
+    let edges = 0, openInterior = false;
+    for (let i = 0; i < region.length; i++) {
+      const point = region[i], x = point % size, y = Math.floor(point / size);
+      if (!x) edges |= 1;
+      if (x === size - 1) edges |= 2;
+      if (!y) edges |= 4;
+      if (y === size - 1) edges |= 8;
+      if (adjacent[point].length === 4 && adjacent[point].every(inClaim)) openInterior = true;
+      for (const next of adjacent[point]) {
+        if (!seen[next] && inClaim(next)) { seen[next] = 1; region.push(next); }
+      }
+    }
+    const broadSide = openInterior && [7, 11, 13, 14].includes(edges);
+    const outside = edges === 15 || (broadSide && claimant && (soleColor || opponentConfined(claimant)));
+    if (outside) needsReview = true;
+    if (outside || soleColor) {
+      const owner = outside ? 0 : claimant;
+      for (const point of region) territory[point] = owner;
+    }
+  }
+  return needsReview;
+}
+
+function proposalKey(game, rule) {
+  return [rule, game.size, game.komi, game.captures[1], game.captures[2], positionKey(game.board), game.dead.join(',')].join('|');
+}
+
+export function scoreGame(game) {
+  const rule = game.scoringRule ?? 'area-v1';
+  if (rule !== 'area-v1' && rule !== 'territory-v1') fail('scoring_rule', '계가 규칙을 확인해 주세요.');
+  const breakdown = {
+    1: { territory: 0, captures: game.captures[1], dead: 0, stones: 0, komi: 0 },
+    2: { territory: 0, captures: game.captures[2], dead: 0, stones: 0, komi: game.komi },
+  };
+  const dead = new Set(game.dead);
+  const aliveBoard = game.board.slice();
+  let survivingColors = 0;
+  const surviving = [0, 0, 0];
+  for (let point = 0; point < aliveBoard.length; point++) {
+    const owner = aliveBoard[point];
+    if (!owner) continue;
+    if (dead.has(point)) {
+      breakdown[3 - owner].dead++;
+      aliveBoard[point] = 0;
+    } else {
+      survivingColors |= owner;
+      surviving[owner]++;
+      if (rule === 'area-v1') breakdown[owner].stones++;
+    }
+  }
+  let territory, needsReview = false;
+  if (rule === 'area-v1') {
+    territory = areaScore(game).territory;
+  } else if (survivingColors === 3 && (surviving[1] > 1 || surviving[2] > 1)) {
+    const rows = [], marks = [];
+    for (let y = 0; y < game.size; y++) {
+      const start = y * game.size;
+      const row = game.board.slice(start, start + game.size);
+      rows.push(row);
+      marks.push(row.map((stone, x) => Boolean(stone && dead.has(start + x))));
+    }
+    territory = territoryScoring(rows, marks).flat().map(cell => cell.isTerritoryFor);
+  } else {
+    // A single stone cannot enclose even a corner intersection. No life/seki
+    // analysis is needed for two isolated stones or a single surviving color.
+    territory = Array(aliveBoard.length).fill(0);
+  }
+  if (rule === 'territory-v1') needsReview = reviewExterior(aliveBoard, game.size, territory, survivingColors);
+  for (const owner of territory) if (owner) breakdown[owner].territory++;
+  const total = color => {
+    const b = breakdown[color];
+    return b.territory + b.komi + (rule === 'area-v1' ? b.stones : b.captures + b.dead);
+  };
+  const black = total(1), white = total(2);
+  return { rule, black, white, winner: black > white ? 1 : 2, margin: Math.abs(black - white), territory, breakdown, needsReview, proposalKey: proposalKey(game, rule) };
+}
+
 function botScoreVote(game, color) {
   const adjacent = neighbors(game.size);
   const checked = new Set();
+  let reader;
   function tryPlay(position, player, point) {
     try {
       return playStone(position, player, { x: point % game.size, y: Math.floor(point / game.size) });
@@ -142,44 +253,66 @@ function botScoreVote(game, color) {
       throw error;
     }
   }
-  function canTakeCleanly(position, stone, group) {
+  function canTakeCleanly(position, stone, group, defender) {
     if (group.liberties.size !== 1) return false;
     const liberty = group.liberties.values().next().value;
-    const after = tryPlay(position, 3 - color, liberty);
+    const after = tryPlay(position, 3 - defender, liberty);
     // A ko or snapback still has to be resolved on the board.
     return after !== null && after.board[stone] === 0 && chain(after.board, adjacent, liberty).liberties.size > 1;
+  }
+  function enclosed(group, defender) {
+    const pocket = new Set([...group.stones, ...group.liberties]), wall = new Set();
+    for (const point of pocket) for (const neighbor of adjacent[point]) {
+      if (pocket.has(neighbor) || wall.has(neighbor)) continue;
+      if (game.board[neighbor] !== 3 - defender) return false;
+      const enclosing = chain(game.board, adjacent, neighbor);
+      // A weak surrounding wall can be threatened by a move outside the pocket.
+      if ([...enclosing.liberties].filter(liberty => !pocket.has(liberty)).length < 3) return false;
+      for (const member of enclosing.stones) wall.add(member);
+    }
+    return wall.size > 0;
+  }
+  function provenDead(stone, group, defender) {
+    if (group.liberties.size === 2 && game.scoringRule === 'territory-v1' && enclosed(group, defender)) {
+      reader ??= tacticalReader(game, adjacent);
+      // Require a clean forced capture even if the surrounded player moves first.
+      // A ko, a snapback or a line we cannot resolve is never proof of death.
+      return [defender, 3 - defender].every(turn => reader.read(game.board, stone, defender, turn, 8, { left: 56 }, [], true) === 1);
+    }
+    if (!canTakeCleanly(game, stone, group, defender)) return false;
+    const defenses = new Set(group.liberties), examinedEnemies = new Set();
+    for (const member of group.stones) for (const point of adjacent[member]) {
+      if (game.board[point] !== 3 - defender || examinedEnemies.has(point)) continue;
+      const enemy = chain(game.board, adjacent, point);
+      for (const enemyStone of enemy.stones) examinedEnemies.add(enemyStone);
+      if (enemy.liberties.size === 1) defenses.add(enemy.liberties.values().next().value);
+    }
+    for (const defense of defenses) {
+      const after = tryPlay(game, defender, defense);
+      if (after && !canTakeCleanly(after, stone, chain(after.board, adjacent, stone), defender)) return false;
+    }
+    return true;
   }
   for (const stone of game.dead) {
     if (game.board[stone] !== color || checked.has(stone)) continue;
     const group = chain(game.board, adjacent, stone);
     for (const member of group.stones) checked.add(member);
-    let defensible = !canTakeCleanly(game, stone, group);
-    if (!defensible) {
-      // An atari can be escaped by extending or by capturing a touching enemy chain.
-      const defenses = new Set(group.liberties);
-      const examinedEnemies = new Set();
-      for (const member of group.stones) {
-        for (const point of adjacent[member]) {
-          if (game.board[point] !== 3 - color || examinedEnemies.has(point)) continue;
-          const enemy = chain(game.board, adjacent, point);
-          for (const enemyStone of enemy.stones) examinedEnemies.add(enemyStone);
-          if (enemy.liberties.size === 1) defenses.add(enemy.liberties.values().next().value);
-        }
-      }
-      for (const defense of defenses) {
-        const after = tryPlay(game, color, defense);
-        if (after && !canTakeCleanly(after, stone, chain(after.board, adjacent, stone))) {
-          defensible = true;
-          break;
-        }
-      }
+    if (!provenDead(stone, group, color)) return { type: 'markDead', x: stone % game.size, y: Math.floor(stone / game.size) };
+  }
+  if (game.scoringRule === 'territory-v1') {
+    const marks = new Set(game.dead);
+    for (let stone = 0; stone < game.board.length; stone++) {
+      if (game.board[stone] !== 3 - color || checked.has(stone)) continue;
+      const group = chain(game.board, adjacent, stone);
+      for (const member of group.stones) checked.add(member);
+      // Unmarked opponent stones remain live. Resolve a proven capture by playing it out.
+      if (!marks.has(stone) && provenDead(stone, group, 3 - color)) return { type: 'resume' };
     }
-    if (defensible) return { type: 'markDead', x: stone % game.size, y: Math.floor(stone / game.size) };
   }
   return { type: 'confirmScore' };
 }
 
-function scoringAction(game, color, action) {
+function scoringAction(game, color, action, scorePreview) {
   const lastMove = { type: action.type, color };
   if (action.type === 'resume') {
     return { ...game, phase: 'playing', passes: 0, turn: game.resumeTurn, resumeTurn: null, dead: [], confirmed: [], lastMove };
@@ -197,23 +330,28 @@ function scoringAction(game, color, action) {
     return { ...game, turn: 3 - color, dead: [...dead].sort((a, b) => a - b), confirmed: [], lastMove: { ...lastMove, x: action.x, y: action.y } };
   }
   if (action.type === 'confirmScore') {
+    if (action.scoringRule !== undefined && action.scoringRule !== (game.scoringRule ?? 'area-v1')) {
+      fail('scoring_rule', '현재 대국의 계가 규칙을 다시 확인해 주세요.');
+    }
     if (game.confirmed.includes(color)) fail('already_confirmed', '이미 계가에 동의했습니다.');
     const confirmed = [...game.confirmed, color];
     if (confirmed.length < 2) return { ...game, turn: 3 - color, confirmed, lastMove };
-    const { black, white, winner, margin } = areaScore(game);
+    const rule = game.scoringRule ?? 'area-v1';
+    const matchesProposal = scorePreview?.rule === rule && scorePreview.proposalKey === proposalKey(game, rule);
+    const { black, white, winner, margin } = matchesProposal ? scorePreview : scoreGame(game);
     return { ...game, phase: 'finished', confirmed, lastMove, result: { winner, reason: 'score', black, white, margin } };
   }
   fail('scoring', '계가 중입니다. 사석을 확인하거나 대국을 재개해 주세요.');
 }
 
-export function applyAction(game, color, action) {
+export function applyAction(game, color, action, scorePreview) {
   if (color !== 1 && color !== 2) fail('color', '올바른 대국자를 지정해 주세요.');
   if (game.phase === 'finished') fail('finished', '이미 종료된 대국입니다.');
   if (!action || typeof action.type !== 'string') fail('action', '대국 명령을 확인해 주세요.');
   if (action.type === 'resign') {
     return { ...game, phase: 'finished', lastMove: { type: 'resign', color }, result: { winner: 3 - color, reason: 'resign', black: null, white: null, margin: null } };
   }
-  if (game.phase === 'scoring') return scoringAction(game, color, action);
+  if (game.phase === 'scoring') return scoringAction(game, color, action, scorePreview);
   if (color !== game.turn) fail('turn', '상대의 차례입니다.');
   if (action.type === 'play') return playStone(game, color, action);
   if (action.type === 'pass') {
@@ -382,7 +520,7 @@ function tacticalReader(game, adjacent) {
 
   // A forcing capture is proven only if every legal extension and adjacent countercapture fails.
   // 1 means capture proven, -1 means escape from the forcing sequence, 0 means unresolved.
-  function read(board, anchor, defender, turn, depth, budget, path) {
+  function read(board, anchor, defender, turn, depth, budget, path, cleanCapture = false) {
     if (board[anchor] !== defender) return 1;
     const group = inspect(board, anchor);
     const count = group.liberties.length;
@@ -407,14 +545,15 @@ function tacticalReader(game, adjacent) {
       if (!next) continue;
       legal = true;
       path.push(next.key);
-      const outcome = read(next.board, anchor, defender, 3 - turn, depth - 1, budget, path);
+      const riskyCapture = cleanCapture && next.board[anchor] !== defender && inspect(next.board, point).liberties.length <= 1;
+      const outcome = riskyCapture ? 0 : read(next.board, anchor, defender, 3 - turn, depth - 1, budget, path, cleanCapture);
       path.pop();
       if (attack && outcome === 1 || !attack && outcome === -1) return outcome;
       best = attack ? Math.max(best, outcome) : Math.min(best, outcome);
     }
     if (!legal && !attack) {
       // The defender may tenuki. A prohibited ko recapture is not a forced kill.
-      return read(board, anchor, defender, 3 - turn, depth - 1, budget, path);
+      return read(board, anchor, defender, 3 - turn, depth - 1, budget, path, cleanCapture);
     }
     return best;
   }
@@ -498,14 +637,21 @@ export function chooseBotAction(game, difficulty = 'normal', rng = Math.random) 
   }
   candidates.sort((a, b) => b.score - a.score);
   const reader = tacticalReader(game, adjacent);
-  let best = -Infinity, choice = null, examined = 0;
+  let best = -Infinity, choice = null, examined = 0, usefulTactic = false;
   for (const candidate of candidates) {
     const value = readCandidate(candidate, context, reader, endangered);
     if (value === -Infinity) continue;
+    if (value > 0 && (candidate.captured || candidate.saved)) usefulTactic = true;
     if (value > best) { best = value; choice = candidate; }
     if (++examined >= tuning.width && (best >= 0 || examined >= 2 * tuning.width)) break;
   }
   // Empty regions shared by both sides can still hide unsettled groups. An opening pass is never a score estimate.
-  if (!choice || best < -3 || (game.passes && !opening && tally.winner === color && !choice.captured && !choice.saved)) return { type: 'pass' };
+  if (!choice || best < -3) return { type: 'pass' };
+  if (game.passes && !opening && !usefulTactic && !choice.newAtaris.length) {
+    // Count territory only when actually considering the opponent's pass. Area on
+    // an unfinished board is a positional heuristic, not a settlement forecast.
+    const final = game.scoringRule === 'territory-v1' ? scoreGame(game) : tally;
+    if (!final.needsReview && final.winner === color) return { type: 'pass' };
+  }
   return { type: 'play', x: choice.index % game.size, y: Math.floor(choice.index / game.size) };
 }

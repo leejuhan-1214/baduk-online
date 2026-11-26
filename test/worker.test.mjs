@@ -93,10 +93,15 @@ test('D1 transport preserves ordered state, private profiles, command replay and
   assert.equal(secondGame.you, 1);
   assert.notEqual(secondGame.matchId, finished.matchId);
   const pass = { code, matchId: secondGame.matchId, action: { type: 'pass' } };
-  await command(tokenB, 'action', { ...pass, revision: secondGame.revision });
-  const scoring = await command(tokenA, 'action', { ...pass, revision: secondGame.revision + 1 });
+  await command(tokenB, 'action', { ...pass, revision: secondGame.revision, action: { type: 'play', x: 3, y: 3 } });
+  await command(tokenA, 'action', { ...pass, revision: secondGame.revision + 1 });
+  const scoring = await command(tokenB, 'action', { ...pass, revision: secondGame.revision + 2 });
   const proposal = scoring.data.events[0].room;
+  assert.deepEqual([proposal.scorePreview.black, proposal.scorePreview.white], [0, 6.5]);
   const consent = { code, matchId: proposal.matchId, revision: proposal.revision, action: { type: 'confirmScore' } };
+  const outdated = await command(tokenA, 'action', consent);
+  assert.equal(outdated.data.code, 'scoring_rule_mismatch');
+  consent.action.scoringRule = proposal.scorePreview.rule;
   const confirmationId = crypto.randomUUID();
   const approvals = await Promise.all([
     command(tokenA, 'action', consent, confirmationId), command(tokenB, 'action', consent),
@@ -105,6 +110,8 @@ test('D1 transport preserves ordered state, private profiles, command replay and
   assert.ok(approvals.every(result => result.status === 200));
   const summary = (await invoke('/api/hello', { type: 'hello', token: tokenA })).data;
   assert.equal(summary.room.game.phase, 'finished');
+  assert.equal(summary.room.scorePreview, null);
+  assert.deepEqual([summary.room.game.result.black, summary.room.game.result.white], [0, 6.5]);
   assert.equal(summary.profile.history.filter(row => row.matchId === proposal.matchId).length, 1);
   assert.equal(summary.profile.coins, 175);
   await Promise.all(tasks);

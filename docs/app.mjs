@@ -1,5 +1,5 @@
-import { createGame, applyAction, chooseBotAction, areaScore } from './go.mjs?v=19fit1';
-import { createBoard } from './board.mjs?v=19fit1';
+import { createGame, applyAction, chooseBotAction, scoreGame } from './go.mjs?v=score1';
+import { createBoard } from './board.mjs?v=score1';
 import { createConnection } from './connection.mjs';
 
 const $ = id => document.getElementById(id);
@@ -15,12 +15,17 @@ function practiceRoom(difficulty) {
 let practice = read('practice.v1');
 if(practice?.size!==19 || practice.game?.size!==19 || practice.game.board?.length!==361 || !Array.isArray(practice.game.history)) {
   practice=practiceRoom(Object.hasOwn(levelNames,practice?.difficulty)?practice.difficulty:'normal');
+}else if(practice.game.phase!=='finished' && (practice.game.scoringRule==null || practice.game.scoringRule==='area-v1')){
+  // Local practice has no settlement. Retain the board and review the new proposal afresh.
+  practice={...practice,revision:practice.revision+1,game:{...practice.game,scoringRule:'territory-v1',confirmed:[]}};
+  save('practice.v1',practice);
 }
 let viewed=practice, currentOnline=null, profile=read('profile'), displayQueue=[], displayTimer=null, botTimer=null;
 let localHistory=read('localHistory',[]), historyPage=0;
 let sounds=read('sounds',true), audio, toastTimer, setupBusy=false, confirming=null;
 let mode='practice',level=practice.difficulty;
 let controlBusy=false;
+let reviewFeedback='', calculatedGame=null, calculatedScore=null;
 const reduced=matchMedia('(prefers-reduced-motion: reduce)');
 const invitedCode=(new URL(location.href).searchParams.get('room')||'').trim().toUpperCase();
 const board=createBoard($('board'),clickBoard,boardEnabled);
@@ -49,7 +54,27 @@ function clickBoard(x,y){
   if(!boardEnabled())return;
   void act(viewed.game.phase==='scoring'?{type:'markDead',x,y}:{type:'play',x,y});
 }
+function scoreFor(room){
+  const game=room.game;
+  if(!game || (game.phase!=='scoring' && game.result?.reason!=='score'))return null;
+  if(game.phase==='scoring' && room.scorePreview)return room.scorePreview;
+  if(calculatedGame!==game){
+    calculatedScore=scoreGame(game);
+    calculatedGame=game;
+  }
+  return calculatedScore;
+}
 function show(room,playSound=true){
+  const game=room.game, last=game?.lastMove;
+  if(room.matchId!==viewed.matchId || game?.phase!=='scoring')reviewFeedback='';
+  else if(room.revision!==viewed.revision && last?.type==='markDead'){
+    const point=last.y*game.size+last.x;
+    if(room.mode!=='friend' && last.color!==room.you && !game.dead.includes(point)){
+      reviewFeedback='봇이 사석 표시를 해제했습니다. 이견은 대국 재개로 해결하세요.';
+    }else if(viewed.game?.confirmed?.length){
+      reviewFeedback='사석 표시 변경 · 양측 동의 초기화';
+    }else reviewFeedback='';
+  }
   if(playSound && room.game?.lastMove?.type==='play'
     && (viewed.matchId!==room.matchId || viewed.game?.moveNumber!==room.game.moveNumber)) tick();
   viewed=room;
@@ -90,6 +115,7 @@ function scheduleBot(){
   },reduced.matches?180:670);
 }
 function localAction(color,action){
+  if(action.type==='confirmScore' && !action.scoringRule)action={...action,scoringRule:scoreFor(practice).rule};
   const game=applyAction(practice.game,color,action);
   practice={...practice,revision:practice.revision+1,game};save('practice.v1',practice);
   if(game.result&&!localHistory.some(row=>row.matchId===practice.matchId)){
@@ -109,25 +135,57 @@ async function act(action){
   }catch(e){notify(e.message);}finally{controlBusy=false;render();}
 }
 function resultText(result){return stoneName(result.winner)+' '+(result.reason==='resign'?'불계승':result.margin+'집 승');}
+function showScoreRow(side,color,game,preview,visible){
+  const total=$(side+'Total'), vote=$(side+'Vote'), parts=$(side+'Parts');
+  const reviewing=game?.phase==='scoring';
+  total.hidden=parts.hidden=!visible;
+  vote.hidden=!reviewing;
+  if(!visible)return;
+  total.textContent=(reviewing?preview[side]:game.result[side])+'집';
+  total.setAttribute('aria-label',stoneName(color)+' 합계 '+total.textContent);
+  const agreed=game.confirmed.includes(color);
+  vote.textContent=agreed?'동의':'검토 중';
+  vote.classList.toggle('agreed',agreed);
+  vote.setAttribute('aria-label',stoneName(color)+' '+vote.textContent);
+  const sideScore=preview.breakdown[color];
+  const terms=preview.rule==='territory-v1'
+    ? ['집 '+sideScore.territory,'따낸 돌 '+sideScore.captures,'판 위 사석 '+sideScore.dead]
+    : ['집 '+sideScore.territory,'산 돌 '+sideScore.stones];
+  if(sideScore.komi)terms.push('덤 '+sideScore.komi);
+  parts.textContent=terms.join(' + ');
+  if(preview.rule==='territory-v1'){
+    const opponent=stoneName(3-color);
+    parts.title='따낸 돌은 대국 중 잡은 '+opponent+'돌, 판 위 사석은 계가 때 표시한 '+opponent+'돌입니다.';
+    parts.setAttribute('aria-label',stoneName(color)+'의 집 '+sideScore.territory+'집, 대국 중 따낸 '+opponent+'돌 '+sideScore.captures+'개, 판 위의 '+opponent+' 사석 '+sideScore.dead+'개, 덤 '+sideScore.komi+'집');
+  }else{parts.removeAttribute('title');parts.removeAttribute('aria-label');}
+}
 function render(){
   const g=viewed.game, offline=viewed.mode==='practice', waiting=!g;
   const onlineDown=!offline&&!net.ready, mine=viewed.you;
+  const tally=scoreFor(viewed), reviewing=g?.phase==='scoring';
+  const settledParts=g?.phase==='finished' && g.result.reason==='score' && tally.rule==='territory-v1'
+    && tally.black===g.result.black && tally.white===g.result.white;
+  const showParts=reviewing || settledParts;
+  const ruleLabel=tally?.rule==='area-v1'?'기존 면적 계가':'집 계가';
+  const seats=$('seatBlack').parentElement;
+  seats.classList.toggle('review',showParts);
+  seats.classList.toggle('final-score',settledParts);
   $('boardSize').textContent=(g?.size??19)+'줄';$('modeTag').textContent=modeNames[viewed.mode];
   for(const [color,id] of [[1,'Black'],[2,'White']]){
     const name=viewed.players[color]?.name || '입장 대기';
     $(id.toLowerCase()+'Name').textContent=name+(!offline&&viewed.players[color]&&color===mine?' · 나':'');
     $('seat'+id).classList.toggle('current',g?.phase==='playing'&&g.turn===color);
+    showScoreRow(id.toLowerCase(),color,g,tally,showParts);
   }
   let status;
   if(onlineDown)status='서버에 다시 연결하고 있습니다.';
   else if(waiting)status='친구의 입장을 기다리고 있습니다.';
   else if(g.phase==='finished')status=resultText(g.result);
-  else if(g.phase==='scoring')status=g.confirmed.includes(mine)?'상대의 계가 동의를 기다립니다.':'계가를 확인해 주세요.';
+  else if(reviewing)status=ruleLabel+(g.confirmed.includes(mine)?' · 상대 동의를 기다립니다.':' 미리보기');
   else if(g.turn===mine)status=stoneName(mine)+'돌을 놓을 차례입니다.';
   else status=viewed.mode==='friend'?'상대가 다음 수를 생각 중입니다.':'봇이 다음 수를 생각 중입니다.';
   $('statusText').textContent=status;$('signal').classList.toggle('disconnected',onlineDown);
   $('moves').textContent=(g?.moveNumber??0)+'수';
-  const tally=g && (g.phase==='scoring'||g.result?.reason==='score')?areaScore(g):null;
   const blocked=!available()||controlBusy;
   $('pass').parentElement.hidden=waiting||g.phase!=='playing';
   $('pass').disabled=blocked||waiting||g.turn!==mine;$('resign').disabled=blocked||waiting;
@@ -136,10 +194,10 @@ function render(){
   $('rematch').hidden=g?.phase!=='finished';$('rematch').disabled=blocked||viewed.rematch.includes(mine);
   $('rematch').textContent=offline?'다시 두기':viewed.rematch.includes(mine)?'상대의 재대전 동의를 기다리는 중':'재대전 신청';
   let note='';
-  if(g?.phase==='scoring')note='흑 '+tally.black+'집 · 백 '+tally.white+'집. 사석을 눌러 표시하세요.';
+  if(reviewing)note=reviewFeedback || (tally.needsReview?'열린 경계를 확인하고 사석을 표시하세요.':'돌을 눌러 사석 표시를 바꾸세요.');
   if(g?.phase==='finished'){
     const record=profile?.history?.find(entry=>entry.matchId===viewed.matchId);
-    const total=g.result.reason==='score'?'흑 '+tally.black+'집 · 백 '+tally.white+'집':'';
+    const total=settledParts?'집 계가 확정':g.result.reason==='score'?ruleLabel+' · 흑 '+g.result.black+'집 · 백 '+g.result.white+'집':'';
     const coins=record?(record.delta>0?'+':'')+record.delta+'코인':'';
     note=[total,coins].filter(Boolean).join(' · ');
   }
@@ -252,7 +310,9 @@ $('settingsOpen').onclick=()=>openSettings();$('friendQuick').onclick=()=>openSe
 for(const button of document.querySelectorAll('[data-mode]'))button.onclick=()=>{mode=button.dataset.mode;$('setupStatus').textContent='';refreshSetup();};
 for(const b of $('levels').children)b.onclick=()=>{level=b.dataset.value;refreshSetup();};
 $('createGame').onclick=()=>startSetup();$('joinGame').onclick=()=>startSetup(true);$('joinCode').onkeydown=e=>{if(e.key==='Enter')void startSetup(true);};
-$('pass').onclick=()=>act({type:'pass'});$('confirmScore').onclick=()=>act({type:'confirmScore'});$('resume').onclick=()=>act({type:'resume'});
+$('pass').onclick=()=>act({type:'pass'});
+$('confirmScore').onclick=()=>{const preview=scoreFor(viewed);if(preview)void act({type:'confirmScore',scoringRule:preview.rule});};
+$('resume').onclick=()=>act({type:'resume'});
 $('resign').onclick=()=>confirmAction('기권하시겠어요?',viewed.mode==='practice'?'이 연습 대국은 봇의 불계승으로 끝납니다.':'상대의 불계승으로 대국이 종료되고 코인이 정산됩니다.','기권',()=>act({type:'resign'}));
 $('confirmCancel').onclick=()=>$('confirmDialog').close();
 $('confirmYes').onclick=()=>{const callback=confirming;confirming=null;$('confirmDialog').close();void callback?.();};

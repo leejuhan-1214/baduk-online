@@ -74,6 +74,13 @@ canvas { display: block; width: 100%; height: 100%; outline: none; cursor: cross
 .seat { gap: 10px; min-width: 0; padding: 8px 10px; min-height: 40px; border: 1px solid #42594b; background: #263d31; border-radius: 6px; }
 .seat.current { border-color: #8ca087; background: #314a39; }
 .seat b { min-width: 0; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; font-size: .94rem; }
+.seats.review { grid-template-columns: minmax(0,1fr); gap: 6px; }
+.seats.review .seat { display: grid; grid-template-columns: auto minmax(0,1fr) auto auto; gap: 3px 6px; align-items: center; padding: 6px 8px; }
+.seats.final-score .seat { grid-template-columns: auto minmax(0,1fr) auto; }
+.score-total { color: #fbfbe9; font-size: .88rem; line-height: 1.25; white-space: nowrap; }
+.score-vote { padding: 2px 5px; border: 1px solid #637766; border-radius: 4px; color: #c9d5c7; font-size: .72rem; line-height: 1.25; white-space: nowrap; }
+.score-vote.agreed { color: #eaf4d4; border-color: #829c71; background: #425a3e; }
+.score-parts { grid-column: 1/-1; color: #d1dccb; font-size: .76rem; line-height: 1.4; overflow-wrap: anywhere; }
 .stone { flex: none; width: 23px; height: 22px; border-radius: 50%; box-shadow: 1px 2px 3px #0b1d1285; }
 .black { border: 1px solid #101712; background: radial-gradient(ellipse at 33% 25%,#676a63 0%,#3b403a 32%,#1c211c 69%,#0d120e 100%); }
 .white { border: 1px solid #b7b8aa; background: radial-gradient(ellipse at 30% 22%,#fffff4 0%,#eae9dd 56%,#babbae 97%); }
@@ -194,5 +201,11 @@ input { width: 100%; min-width: 0; min-height: 36px; padding: 6px 9px; border: 1
   .guide summary { padding-block: 4px; }
   .guide p { padding-bottom: 5px; font-size: .81rem; }
   .history-list li { padding-block: 4px; }
+  .game-area:has(.seats.review) { width: min(100%,calc(100dvh + clamp(272px,40vw,325px) - 20px)); grid-template-columns: minmax(0,1fr) clamp(272px,40vw,325px); }
+  .match-panel:has(.seats.review) { gap: 4px; padding: 6px 8px; }
+  .match-panel:has(.seats.review) .room-strip { padding-top: 2px; }
+  .match-panel:has(.seats.review) .room-strip button { padding: 2px 4px; }
+  .seats.review .seat { padding: 3px 6px; gap: 2px 5px; }
+  .score-parts { font-size: .74rem; line-height: 1.25; }
 }
 @media (prefers-reduced-motion: reduce) { *, *::before, *::after { scroll-behavior: auto !important; } }

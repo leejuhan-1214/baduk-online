@@ -1,4 +1,4 @@
-import { BOARD_SIZE, applyAction, chooseBotAction, createGame } from '../shared/go.mjs';
+import { BOARD_SIZE, applyAction, chooseBotAction, createGame, scoreGame } from '../shared/go.mjs';
 
 const BOT = '@bot';
 const BOT_NAMES = { easy: '초급 바둑봇', normal: '중급 바둑봇', hard: '고급 바둑봇' };
@@ -78,6 +78,7 @@ export function createService(snapshot = null) {
       size: room.game?.size ?? BOARD_SIZE, mode: room.mode, difficulty: room.difficulty,
       you: colorOf(room, id), players: { 1: player(1), 2: player(2) },
       game, rematch: [...room.rematch],
+      scorePreview: room.game?.phase === 'scoring' ? structuredClone(room.scorePreview ?? scoreGame(room.game)) : null,
     };
   }
 
@@ -119,6 +120,7 @@ export function createService(snapshot = null) {
     room.rematch = [];
     room.settled = false;
     room.voteRevision = null;
+    room.scorePreview = null;
   }
 
   function createRoom(account, message) {
@@ -203,6 +205,9 @@ export function createService(snapshot = null) {
       account.history.push({
         matchId: room.matchId, mode: room.mode, difficulty: room.difficulty, won, delta, at,
         reason: result.reason, margin: result.margin,
+        ...(result.reason === 'score' ? {
+          scoringRule: room.game.scoringRule ?? 'area-v1', black: result.black, white: result.white,
+        } : {}),
       });
     }
     room.settled = true;
@@ -211,7 +216,15 @@ export function createService(snapshot = null) {
   function play(room, color, action) {
     if (!room.game) reject('waiting_for_guest', '상대가 입장하면 대국을 시작합니다.');
     const previousPhase = room.game.phase;
-    room.game = applyAction(room.game, color, action);
+    // Only a server-owned proposal may supply totals to the final confirmation.
+    const game = applyAction(room.game, color, action, room.scorePreview);
+    let scorePreview = null;
+    if (game.phase === 'scoring') {
+      const changed = previousPhase !== 'scoring' || action.type === 'markDead';
+      scorePreview = !changed && room.scorePreview ? room.scorePreview : scoreGame(game);
+    }
+    room.game = game;
+    room.scorePreview = scorePreview;
     settle(room);
     room.revision++;
     // The players may vote concurrently only while the exact proposal they saw still exists.
@@ -261,6 +274,10 @@ export function createService(snapshot = null) {
         const color = colorOf(room, id);
         recipients = Object.values(room.players);
         if (message.op === 'action') {
+          if (room.game?.phase === 'scoring' && room.game.scoringRule === 'territory-v1'
+            && message.action?.type === 'confirmScore' && message.action.scoringRule !== room.game.scoringRule) {
+            reject('scoring_rule_mismatch', '새로고침한 뒤 서버가 표시하는 계가 결과를 확인하고 동의해 주세요.');
+          }
           play(room, color, message.action);
         } else if (message.op === 'rematch') {
           rematch(room, color);

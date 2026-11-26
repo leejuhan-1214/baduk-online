@@ -98,7 +98,7 @@ test('changing an entire dead chain invalidates both approvals until the new sco
   assert.equal(marked.board[19], 1);
   const finished = applyAction(applyAction(marked, 2, confirm), 1, confirm);
   assert.equal(finished.phase, 'finished');
-  assert.deepEqual(finished.result, { winner: 2, reason: 'score', black: 0, white: 367.5, margin: 367.5 });
+  assert.deepEqual(finished.result, { winner: 2, reason: 'score', black: 0, white: 8.5, margin: 8.5 });
   throwsCode(() => applyAction(finished, 1, confirm), 'finished');
 });
 

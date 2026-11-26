@@ -65,20 +65,24 @@ export function createBoard(canvas, select, canSelect) {
     background(game.size, width, Math.min(window.devicePixelRatio || 1, 3));
     const { at, gap, scale } = geometry, radius = gap * .467;
     context.setTransform(1, 0, 0, 1, 0, 0); context.drawImage(backdrop, 0, 0); context.scale(scale, scale);
-    const dead = new Set(game.dead || []), showArea = game.phase === 'scoring' || game.result?.reason === 'score';
+    const dead = new Set(game.dead || []), reviewing = game.phase === 'scoring', finishedScore = game.result?.reason === 'score';
     game.board.forEach((color, index) => {
       const px=at(index%game.size), py=at(Math.floor(index/game.size));
-      if (color) stone(px,py,color,radius,dead.has(index)?.40:1);
-      if (showArea && territory?.[index]) {
-        const areaSize = Math.max(3,radius*.45);
-        context.fillStyle = territory[index] === 1 ? '#282d27' : '#fffeee'; context.fillRect(px-areaSize/2,py-areaSize/2,areaSize,areaSize);
+      const markedDead = dead.has(index);
+      if (color && !(markedDead && finishedScore)) stone(px,py,color,radius,markedDead?.38:1);
+      if ((reviewing || finishedScore) && territory?.[index] && (!color || finishedScore && markedDead)) {
+        const side = Math.max(3,radius*.53), left = px-side/2, top = py-side/2;
+        context.fillStyle = territory[index] === 1 ? '#282d27' : '#fffeee'; context.fillRect(left,top,side,side);
+        if (territory[index] === 2) {
+          context.lineWidth = Math.max(.55,radius*.055); context.strokeStyle='#746746'; context.strokeRect(left,top,side,side);
+        }
       }
-      if (dead.has(index)) {
+      if (markedDead && reviewing) {
         const r=radius*.33;context.strokeStyle='#9a332a';context.lineWidth=Math.max(1.4,radius*.13);context.beginPath();context.moveTo(px-r,py-r);context.lineTo(px+r,py+r);context.moveTo(px-r,py+r);context.lineTo(px+r,py-r);context.stroke();
       }
     });
     const last = game.lastMove;
-    if (last?.type === 'play' && game.board[last.y*game.size + last.x] === last.color) {
+    if (game.phase === 'playing' && last?.type === 'play' && game.board[last.y*game.size + last.x] === last.color) {
       context.strokeStyle= last.color === 1 ? '#eeedda' : '#435044';context.lineWidth=Math.max(1,radius*.12);context.beginPath();context.arc(at(last.x),at(last.y),radius*.27,0,Math.PI*2);context.stroke();
     }
     const point = focusVisible ? focus : hover;
