@@ -108,5 +108,14 @@ export function createBoard(canvas, select, canSelect) {
     } else if(event.key==='Enter'||event.key===' ') {event.preventDefault();if(focus)select(focus.x,focus.y);}
   });
   new ResizeObserver(draw).observe(canvas);
-  return (nextGame, nextTerritory) => {if(game?.size!==nextGame?.size){hover=null;focus=null;}game=nextGame;territory=nextTerritory;draw();};
+  return (nextGame, nextTerritory) => {
+    if(game?.size!==nextGame.size){
+      hover=null;
+      focus=null;
+      canvas.setAttribute('aria-label',nextGame.size+'줄 바둑판. 방향키로 이동하고 Enter로 착수하세요.');
+    }
+    game=nextGame;
+    territory=nextTerritory;
+    draw();
+  };
 }

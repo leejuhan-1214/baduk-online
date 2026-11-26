@@ -1,5 +1,5 @@
-import { createGame, applyAction, chooseBotAction, areaScore } from './go.mjs?v=8ebc0161';
-import { createBoard, coordinate } from './board.mjs';
+import { createGame, applyAction, chooseBotAction, areaScore } from './go.mjs?v=19fit1';
+import { createBoard } from './board.mjs?v=19fit1';
 import { createConnection } from './connection.mjs';
 
 const $ = id => document.getElementById(id);
@@ -8,16 +8,18 @@ const levelNames = {easy:'쉬움',normal:'보통',hard:'어려움'};
 const stoneName = color => color === 1 ? '흑' : '백';
 function read(key,fallback=null) {try{return JSON.parse(localStorage.getItem('sudam-go.'+key))??fallback;}catch{return fallback;}}
 function save(key,value) {try{localStorage.setItem('sudam-go.'+key,JSON.stringify(value));}catch{/* The current game still works without persistent storage. */}}
-function practiceRoom(size, difficulty) {
-  return {code:'practice',revision:0,mode:'practice',difficulty,matchId:crypto.randomUUID(),size,you:1,
-    players:{1:{name:'나'},2:{name:'연습 봇'}},game:createGame(size),rematch:[]};
+function practiceRoom(difficulty) {
+  return {code:'practice',revision:0,mode:'practice',difficulty,matchId:crypto.randomUUID(),size:19,you:1,
+    players:{1:{name:'나'},2:{name:'연습 봇'}},game:createGame(),rematch:[]};
 }
 let practice = read('practice.v1');
-if(!practice?.game || ![9,13,19].includes(practice.size) || !Array.isArray(practice.game.history)) practice=practiceRoom(13,'normal');
+if(practice?.size!==19 || practice.game?.size!==19 || practice.game.board?.length!==361 || !Array.isArray(practice.game.history)) {
+  practice=practiceRoom(Object.hasOwn(levelNames,practice?.difficulty)?practice.difficulty:'normal');
+}
 let viewed=practice, currentOnline=null, profile=read('profile'), displayQueue=[], displayTimer=null, botTimer=null;
-let localHistory=read('localHistory',[]), logState=read('log',{matchId:null,entries:[]});
+let localHistory=read('localHistory',[]), historyPage=0;
 let sounds=read('sounds',true), audio, toastTimer, setupBusy=false, confirming=null;
-let mode='practice',size=practice.size,level=practice.difficulty;
+let mode='practice',level=practice.difficulty;
 let controlBusy=false;
 const reduced=matchMedia('(prefers-reduced-motion: reduce)');
 const invitedCode=(new URL(location.href).searchParams.get('room')||'').trim().toUpperCase();
@@ -47,17 +49,12 @@ function clickBoard(x,y){
   if(!boardEnabled())return;
   void act(viewed.game.phase==='scoring'?{type:'markDead',x,y}:{type:'play',x,y});
 }
-function pushLog(room,playSound){
-  if(logState.matchId!==room.matchId)logState={matchId:room.matchId,entries:[]};
-  const g=room.game,last=g?.lastMove;
-  if(last&&['pass','play'].includes(last.type)&&!logState.entries.some(x=>x.no===g.moveNumber)){
-    logState.entries.unshift({no:g.moveNumber,color:last.color,label:last.type==='pass'?'한 수 쉼':coordinate(room.size,last.x,last.y)});
-    logState.entries=logState.entries.slice(0,5);
-    if(playSound&&last.type==='play')tick();
-  }
-  save('log',logState);
+function show(room,playSound=true){
+  if(playSound && room.game?.lastMove?.type==='play'
+    && (viewed.matchId!==room.matchId || viewed.game?.moveNumber!==room.game.moveNumber)) tick();
+  viewed=room;
+  render();
 }
-function show(room,playSound=true){viewed=room;pushLog(room,playSound);render();}
 function drainQueue(){
   if(displayTimer!==null||!displayQueue.length)return;
   show(displayQueue.shift());
@@ -111,12 +108,11 @@ async function act(action){
     else{controlBusy=true;render();await net.command('action',{...revisionFields(viewed),action});}
   }catch(e){notify(e.message);}finally{controlBusy=false;render();}
 }
-function setTextMetric(id,value,unit){const fragment=document.createDocumentFragment();fragment.append(String(value));const s=document.createElement('small');s.textContent=unit;fragment.append(s);$(id).replaceChildren(fragment);}
 function resultText(result){return stoneName(result.winner)+' '+(result.reason==='resign'?'불계승':result.margin+'집 승');}
 function render(){
   const g=viewed.game, offline=viewed.mode==='practice', waiting=!g;
   const onlineDown=!offline&&!net.ready, mine=viewed.you;
-  $('boardSize').textContent=viewed.size+'줄';$('modeTag').textContent=modeNames[viewed.mode];
+  $('boardSize').textContent=(g?.size??19)+'줄';$('modeTag').textContent=modeNames[viewed.mode];
   for(const [color,id] of [[1,'Black'],[2,'White']]){
     const name=viewed.players[color]?.name || '입장 대기';
     $(id.toLowerCase()+'Name').textContent=name+(!offline&&viewed.players[color]&&color===mine?' · 나':'');
@@ -130,45 +126,48 @@ function render(){
   else if(g.turn===mine)status=stoneName(mine)+'돌을 놓을 차례입니다.';
   else status=viewed.mode==='friend'?'상대가 다음 수를 생각 중입니다.':'봇이 다음 수를 생각 중입니다.';
   $('statusText').textContent=status;$('signal').classList.toggle('disconnected',onlineDown);
-  setTextMetric('moves',g?.moveNumber??0,'수');setTextMetric('blackCaptures',g?.captures[1]??0,'개');setTextMetric('whiteCaptures',g?.captures[2]??0,'개');
+  $('moves').textContent=(g?.moveNumber??0)+'수';
   const tally=g && (g.phase==='scoring'||g.result?.reason==='score')?areaScore(g):null;
   const blocked=!available()||controlBusy;
-  $('pass').parentElement.hidden=g?.phase==='finished'||g?.phase==='scoring';
+  $('pass').parentElement.hidden=waiting||g.phase!=='playing';
   $('pass').disabled=blocked||waiting||g.turn!==mine;$('resign').disabled=blocked||waiting;
   $('scoringControls').hidden=g?.phase!=='scoring';
   $('confirmScore').disabled=blocked||g?.confirmed.includes(mine);$('resume').disabled=blocked;
   $('rematch').hidden=g?.phase!=='finished';$('rematch').disabled=blocked||viewed.rematch.includes(mine);
   $('rematch').textContent=offline?'다시 두기':viewed.rematch.includes(mine)?'상대의 재대전 동의를 기다리는 중':'재대전 신청';
   let note='';
-  if(waiting)note='초대 링크나 방 코드를 친구에게 보내 주세요.';
-  if(g?.phase==='scoring')note='흑 '+tally.black+'집 · 백 '+tally.white+'집. 죽은 돌을 눌러 표시한 뒤 계가에 동의하세요.';
+  if(g?.phase==='scoring')note='흑 '+tally.black+'집 · 백 '+tally.white+'집. 사석을 눌러 표시하세요.';
   if(g?.phase==='finished'){
     const record=profile?.history?.find(entry=>entry.matchId===viewed.matchId);
-    note=(g.result.reason==='score'?'흑 '+tally.black+'집 · 백 '+tally.white+'집':'기권으로 대국이 종료되었습니다.')+(record?' · '+(record.delta>0?'+':'')+record.delta+'코인':'');
+    const total=g.result.reason==='score'?'흑 '+tally.black+'집 · 백 '+tally.white+'집':'';
+    const coins=record?(record.delta>0?'+':'')+record.delta+'코인':'';
+    note=[total,coins].filter(Boolean).join(' · ');
   }
   $('phaseNote').textContent=note;$('phaseNote').hidden=!note;
   $('roomStrip').hidden=viewed.mode!=='friend';$('roomCode').textContent=viewed.mode==='friend'?viewed.code:'';
   $('copyRoom').disabled=onlineDown;
-  const boardGame=g||emptyBoard(viewed.size);
-  board(boardGame,tally?.territory);
-  $('emptyLog').hidden=Boolean(logState.entries?.length);$('logCount').textContent=(g?.moveNumber??0)+'수';
-  const rows=(logState.entries||[]).map(item=>{
-    const li=document.createElement('li'),no=document.createElement('span'),dot=document.createElement('i'),color=document.createElement('b'),coord=document.createElement('span');
-    no.className='move-no';no.textContent=item.no+'수';dot.className='dot-stone '+(item.color===1?'black':'white');color.textContent=stoneName(item.color);coord.className='coord';coord.textContent=item.label;li.append(no,dot,color,coord);return li;
-  });$('moveLog').replaceChildren(...rows);
+  board(g||waitingBoard,tally?.territory);
   const title=sounds?'착수 소리 끄기':'착수 소리 켜기';
   $('soundButton').setAttribute('aria-label',title);$('soundButton').title=title;$('soundButton').setAttribute('aria-pressed',String(sounds));
+  $('soundText').textContent=title;
   $('soundButton').querySelector('use').setAttribute('href',sounds?'#i-sound':'#i-mute');
   if($('historyDialog').open)renderHistory();
 }
-const emptyBoards=new Map();
-function emptyBoard(n){if(!emptyBoards.has(n))emptyBoards.set(n,createGame(n));return emptyBoards.get(n);}
+const waitingBoard=createGame();
+const compactHistory=matchMedia('(max-height: 520px)');
+compactHistory.addEventListener('change',()=>{if($('historyDialog').open)renderHistory();});
 
 function renderHistory(){
   const stats=$('profileStats');stats.replaceChildren();
   if(profile){const p=document.createElement('p');p.className='profile-line';p.textContent=profile.name+' · '+profile.coins+'코인 · '+profile.wins+'승 '+profile.losses+'패 · 누적 '+profile.score+'점';stats.append(p);}
   const data=[...(profile?.history||[]),...localHistory].sort((a,b)=>new Date(b.at)-new Date(a.at)).slice(0,50);
-  const rows=data.map(entry=>{const li=document.createElement('li'),left=document.createElement('div'),strong=document.createElement('strong'),date=document.createElement('small'),right=document.createElement('span');
+  const perPage=compactHistory.matches?3:4, pages=Math.max(1,Math.ceil(data.length/perPage));
+  historyPage=Math.max(0,Math.min(historyPage,pages-1));
+  $('historyPager').hidden=pages===1;
+  $('historyPage').textContent=(historyPage+1)+' / '+pages;
+  $('historyPrev').disabled=historyPage===0;
+  $('historyNext').disabled=historyPage===pages-1;
+  const rows=data.slice(historyPage*perPage,(historyPage+1)*perPage).map(entry=>{const li=document.createElement('li'),left=document.createElement('div'),strong=document.createElement('strong'),date=document.createElement('small'),right=document.createElement('span');
     strong.textContent=modeNames[entry.mode]+' · '+(entry.won?'승리':'패배');date.textContent=new Intl.DateTimeFormat('ko-KR',{month:'short',day:'numeric',hour:'2-digit',minute:'2-digit'}).format(new Date(entry.at));
     right.textContent=(entry.reason==='resign'?'불계':entry.margin+'집')+(entry.delta!=null?' · '+(entry.delta>0?'+':'')+entry.delta+'코인':'');left.append(strong,date);li.append(left,right);return li;});
   if(!rows.length){const li=document.createElement('li');li.className='history-empty';li.textContent='아직 완료한 대국이 없습니다.';rows.push(li);}
@@ -176,16 +175,16 @@ function renderHistory(){
 }
 function refreshSetup(){
   for(const b of document.querySelectorAll('[data-mode]')){const active=b.dataset.mode===mode;b.classList.toggle('selected',active);b.setAttribute('aria-pressed',String(active));}
-  for(const [id,value] of [['sizes',size],['levels',level]])for(const b of $(id).children){
-    const active=b.dataset.value===String(value);b.classList.toggle('selected',active);b.setAttribute('aria-pressed',String(active));}
+  for(const b of $('levels').children){
+    const active=b.dataset.value===level;b.classList.toggle('selected',active);b.setAttribute('aria-pressed',String(active));}
   $('levelsField').hidden=mode==='friend';$('onlineFields').hidden=mode==='practice';$('joinField').hidden=mode!=='friend';
   const rewards={easy:'승리 5코인 · 패배 최대 10코인',normal:'승리 10코인 · 패배 최대 10코인',hard:'승리 20코인 · 패배 최대 20코인'};
-  $('setupHelp').textContent=mode==='practice'?'코인 부담 없이 이 기기에서 봇과 연습합니다.':mode==='friend'?'방을 만들고 초대 링크를 보내세요. 집 차이당 10코인, 기권은 10코인으로 정산하며 패자의 잔액은 음수가 될 수 있습니다.':'서버에서 봇과 대국하고 전적을 기록합니다. '+rewards[level]+'.';
+  $('setupHelp').textContent=mode==='practice'?'코인 정산 없이 연습합니다.':mode==='friend'?'집 차이당 10코인 · 기권 10코인':rewards[level];
   $('createGame').textContent=mode==='friend'?'친구 대국방 만들기':mode==='bot'?'봇 대국 시작':'연습 대국 시작';
   for(const input of $('settingsDialog').querySelectorAll('button:not(.modal-close), input'))input.disabled=setupBusy;
 }
 function openSettings(selected){
-  mode=selected||viewed.mode;size=viewed.size;level=viewed.difficulty||'normal';
+  mode=selected||viewed.mode;level=viewed.difficulty||'normal';
   $('nickname').value=profile?.name||read('nickname','');
   $('setupStatus').textContent='';delete $('setupStatus').dataset.waiting;
   refreshSetup();if(!$('settingsDialog').open)$('settingsDialog').showModal();
@@ -214,11 +213,11 @@ async function startSetup(join=false,replace=false){
         if(alias&&profile?.name!==alias)await net.command('rename',{name:alias});
         save('nickname',alias);
         if(join)await net.command('join',{code:$('joinCode').value.trim().toUpperCase()});
-        else await net.command('create',{mode,size,difficulty:level});
+        else await net.command('create',{mode,size:19,difficulty:level});
       }
     }
     if(mode==='practice'){
-      practice=practiceRoom(size,level);save('practice.v1',practice);show(practice,false);scheduleBot();
+      practice=practiceRoom(level);save('practice.v1',practice);show(practice,false);scheduleBot();
     }
     clearInvite();$('settingsDialog').close();
   }catch(e){$('setupStatus').textContent=e.message;if(!net.ready)$('setupStatus').dataset.waiting='1';}
@@ -234,12 +233,23 @@ for(const dialog of document.querySelectorAll('dialog')){
   dialog.querySelector('.modal-close').onclick=()=>dialog.close();
   dialog.addEventListener('click',e=>{if(e.target!==dialog)return;const rect=dialog.getBoundingClientRect();if(e.clientX<rect.left||e.clientX>rect.right||e.clientY<rect.top||e.clientY>rect.bottom)dialog.close();});
 }
-$('homeNav').onclick=()=>window.scrollTo({top:0,behavior:reduced.matches?'instant':'smooth'});
-$('guideNav').onclick=()=>$('guideDialog').showModal();
-$('historyNav').onclick=()=>{renderHistory();$('historyDialog').showModal();};
+const moreTools=$('moreTools');
+function closeMoreTools(restoreFocus=false){
+  if(!moreTools.open)return;
+  moreTools.open=false;
+  if(restoreFocus)$('moreToggle').focus();
+}
+document.addEventListener('pointerdown',event=>{if(!moreTools.contains(event.target))closeMoreTools();});
+document.addEventListener('focusin',event=>{if(!moreTools.contains(event.target))closeMoreTools();});
+moreTools.addEventListener('keydown',event=>{
+  if(event.key==='Escape'){event.preventDefault();closeMoreTools(true);}
+});
+$('guideNav').onclick=()=>{closeMoreTools(true);$('guideDialog').showModal();};
+$('historyNav').onclick=()=>{closeMoreTools(true);historyPage=0;renderHistory();$('historyDialog').showModal();};
+$('historyPrev').onclick=()=>{historyPage--;renderHistory();};
+$('historyNext').onclick=()=>{historyPage++;renderHistory();};
 $('settingsOpen').onclick=()=>openSettings();$('friendQuick').onclick=()=>openSettings('friend');
 for(const button of document.querySelectorAll('[data-mode]'))button.onclick=()=>{mode=button.dataset.mode;$('setupStatus').textContent='';refreshSetup();};
-for(const b of $('sizes').children)b.onclick=()=>{size=Number(b.dataset.value);refreshSetup();};
 for(const b of $('levels').children)b.onclick=()=>{level=b.dataset.value;refreshSetup();};
 $('createGame').onclick=()=>startSetup();$('joinGame').onclick=()=>startSetup(true);$('joinCode').onkeydown=e=>{if(e.key==='Enter')void startSetup(true);};
 $('pass').onclick=()=>act({type:'pass'});$('confirmScore').onclick=()=>act({type:'confirmScore'});$('resume').onclick=()=>act({type:'resume'});
@@ -248,10 +258,27 @@ $('confirmCancel').onclick=()=>$('confirmDialog').close();
 $('confirmYes').onclick=()=>{const callback=confirming;confirming=null;$('confirmDialog').close();void callback?.();};
 $('copyRoom').onclick=copyInvite;
 $('rematch').onclick=async()=>{
-  if(viewed.mode==='practice'){practice=practiceRoom(viewed.size,viewed.difficulty);save('practice.v1',practice);show(practice,false);scheduleBot();return;}
+  if(viewed.mode==='practice'){practice=practiceRoom(viewed.difficulty);save('practice.v1',practice);show(practice,false);scheduleBot();return;}
   try{await net.command('rematch',revisionFields(viewed));}catch(e){notify(e.message);}
 };
-$('soundButton').onclick=()=>{sounds=!sounds;save('sounds',sounds);audioUnlock();render();if(sounds)tick();};
+$('soundButton').onclick=()=>{sounds=!sounds;save('sounds',sounds);audioUnlock();render();if(sounds)tick();closeMoreTools(true);};
+const fullscreenButton=$('fullscreenButton');
+function syncFullscreen(){
+  const active=Boolean(document.fullscreenElement);
+  fullscreenButton.hidden=!document.fullscreenEnabled;
+  fullscreenButton.title=active?'전체 화면 종료':'전체 화면';
+  fullscreenButton.setAttribute('aria-label',fullscreenButton.title);
+  fullscreenButton.setAttribute('aria-pressed',String(active));
+  fullscreenButton.querySelector('use').setAttribute('href',active?'#i-contract':'#i-expand');
+}
+fullscreenButton.onclick=async()=>{
+  try{
+    if(document.fullscreenElement)await document.exitFullscreen();
+    else await document.documentElement.requestFullscreen();
+  }catch{notify('이 브라우저에서는 전체 화면을 열 수 없습니다.');}
+};
+document.addEventListener('fullscreenchange',syncFullscreen);
+syncFullscreen();
 show(practice,false);scheduleBot();
 if(invitedCode){$('joinCode').value=invitedCode;openSettings('friend');}
 if(net.hasAccount)net.connect().catch(e=>{if(viewed.mode!=='practice')notify(e.message);});

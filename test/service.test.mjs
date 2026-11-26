@@ -15,19 +15,87 @@ function action(service, account, type, fields = {}, id) {
   return roomCommand(service, account, 'action', { action: { type, ...fields } }, id);
 }
 
+test('new rooms reject smaller sizes and legacy waiting rooms start on 19 lines', async () => {
+  const service = createService();
+  const a = await connect(service, '새 대국');
+  const b = await connect(service, '상대');
+  for (const mode of ['friend', 'bot']) {
+    for (const size of [9, 13]) {
+      assert.throws(() => send(service, a, 'create', { mode, size }), { code: 'invalid_settings' });
+    }
+  }
+  assert.equal(service.view(a.accountId).room, null);
+  send(service, a, 'create', { mode: 'friend' });
+  const code = service.view(a.accountId).room.code;
+  const stored = service.snapshot();
+  stored.rooms[code].size = 13;
+  const restored = createService(stored);
+  assert.equal(restored.view(a.accountId).room.size, 19);
+  send(restored, b, 'join', { code });
+  assert.equal(restored.view(a.accountId).room.game.board.length, 361);
+});
+
+for (const size of [9, 13]) {
+  test('restore, finish and record an existing ' + size + '-line game before a 19-line rematch', async () => {
+    const service = createService();
+    const a = await connect(service, '기존 계정');
+    const b = await connect(service, '친구');
+    send(service, a, 'create', { mode: 'bot', difficulty: 'easy' });
+    action(service, a, 'resign');
+    const pastRecord = service.view(a.accountId).profile.history[0];
+    roomCommand(service, a, 'leave');
+    send(service, a, 'create', { mode: 'friend' });
+    const code = service.view(a.accountId).room.code;
+    send(service, b, 'join', { code });
+    const stored = service.snapshot();
+    const room = stored.rooms[code];
+    room.size = size;
+    // Pre-update snapshots encode three empty points per 'A' in the superko history.
+    const board = Array(size * size).fill(0);
+    room.game = { ...room.game, size, board, history: ['A'.repeat(Math.ceil(board.length / 3))] };
+    room.game = applyAction(room.game, 1, { type: 'play', x: size - 1, y: size - 1 });
+    const oldMatch = room.matchId;
+
+    const restored = createService(stored);
+    const resumed = (await restored.hello({ type: 'hello', token: a.message.token })).message;
+    assert.equal(resumed.room.size, size);
+    assert.equal(resumed.room.game.board.at(-1), 1);
+    assert.deepEqual(resumed.profile.history, [pastRecord]);
+    action(restored, b, 'play', { x: 0, y: 0 });
+    action(restored, a, 'pass');
+    action(restored, b, 'pass');
+    action(restored, a, 'confirmScore');
+    action(restored, b, 'confirmScore');
+    const finished = restored.view(a.accountId);
+    assert.equal(finished.room.size, size);
+    assert.equal(finished.profile.history[0].matchId, oldMatch);
+    assert.deepEqual(finished.profile.history[1], pastRecord);
+
+    const reloaded = createService(restored.snapshot());
+    roomCommand(reloaded, a, 'rematch');
+    roomCommand(reloaded, b, 'rematch');
+    const next = reloaded.view(a.accountId);
+    assert.equal(next.room.size, 19);
+    assert.equal(next.room.game.size, 19);
+    assert.equal(next.room.game.board.length, 361);
+    assert.notEqual(next.room.matchId, oldMatch);
+    assert.deepEqual(next.profile, finished.profile);
+  });
+}
+
 test('two accounts play, reconnect, settle once, rematch with swapped colors, and leave', async () => {
   let service = createService();
   const a = await connect(service, '흑돌');
   const b = await connect(service, '백돌');
   assert.notEqual(a.message.token, b.message.token);
-  send(service, a, 'create', { size: 9, mode: 'friend' });
+  send(service, a, 'create', { size: 19, mode: 'friend' });
   const code = service.view(a.accountId).room.code;
   const joined = send(service, b, 'join', { code: code.toLowerCase() });
   assert.equal(joined.updates.length, 2);
   assert.equal(service.view(b.accountId).room.you, 2);
   const firstId = crypto.randomUUID();
   const first = action(service, a, 'play', { x: 2, y: 2 }, firstId);
-  assert.equal(first.updates[1].message.room.game.board[20], 1);
+  assert.equal(first.updates[1].message.room.game.board[40], 1);
   const firstRevision = first.updates[0].message.room.revision;
   assert.throws(() => send(service, b, 'action', { code, revision: firstRevision - 1, action: { type: 'pass' } }), { code: 'stale_revision' });
   send(service, a, 'action', { code, revision: 2, action: { type: 'play', x: 2, y: 2 } }, firstId);
@@ -75,7 +143,7 @@ test('two-pass scoring requires both humans and half points transfer exact coins
   const service = createService();
   const a = await connect(service, '봄');
   const b = await connect(service, '가을');
-  send(service, a, 'create', { mode: 'friend', size: 9 });
+  send(service, a, 'create', { mode: 'friend', size: 19 });
   send(service, b, 'join', { code: service.view(a.accountId).room.code });
   action(service, a, 'pass');
   action(service, b, 'pass');
@@ -95,7 +163,7 @@ test('friend scores transfer the full amount and later bot losses cannot increas
   const snapshot = initial.snapshot();
   snapshot.accounts[a.accountId].coins = 3;
   const service = createService(snapshot);
-  send(service, a, 'create', { mode: 'friend', size: 9 });
+  send(service, a, 'create', { mode: 'friend', size: 19 });
   send(service, b, 'join', { code: service.view(a.accountId).room.code });
   action(service, a, 'pass');
   action(service, b, 'pass');
@@ -105,7 +173,7 @@ test('friend scores transfer the full amount and later bot losses cannot increas
   assert.equal(service.view(b.accountId).profile.coins, 165);
   assert.equal(service.view(a.accountId).profile.history[0].delta, -65);
   roomCommand(service, a, 'leave');
-  send(service, a, 'create', { mode: 'bot', difficulty: 'hard', size: 9 });
+  send(service, a, 'create', { mode: 'bot', difficulty: 'hard', size: 19 });
   action(service, a, 'resign');
   assert.equal(service.view(a.accountId).profile.coins, -62);
   assert.equal(service.view(a.accountId).profile.history[0].delta, 0);
@@ -115,7 +183,7 @@ test('a consent cannot cross a dead-group edit, a resumption, or a match boundar
   const service = createService();
   const a = await connect(service, '흑');
   const b = await connect(service, '백');
-  send(service, a, 'create', { size: 9, mode: 'friend' });
+  send(service, a, 'create', { size: 19, mode: 'friend' });
   const code = service.view(a.accountId).room.code;
   send(service, b, 'join', { code });
   action(service, a, 'play', { x: 1, y: 1 });
@@ -160,7 +228,7 @@ test('third account cannot inspect a private room, move, evict players, or imper
   const b = await connect(service, '바람');
   const c = await connect(service, '바람');
   assert.notEqual(a.accountId, b.accountId);
-  send(service, a, 'create', { mode: 'friend', size: 9 });
+  send(service, a, 'create', { mode: 'friend', size: 19 });
   const { code } = service.view(a.accountId).room;
   send(service, b, 'join', { code });
   const args = { code, revision: service.view(a.accountId).room.revision, action: { type: 'resign' } };
@@ -177,7 +245,7 @@ test('third account cannot inspect a private room, move, evict players, or imper
 test('bot challenges a proposed removal before confirming the score', async () => {
   const initial = createService();
   const a = await connect(initial, '바다');
-  send(initial, a, 'create', { mode: 'bot', size: 9 });
+  send(initial, a, 'create', { mode: 'bot', size: 19 });
   const code = initial.view(a.accountId).room.code;
   const db = initial.snapshot();
   const room = db.rooms[code];
@@ -199,7 +267,7 @@ for (const [difficulty, win, loss] of [['easy', 5, 10], ['normal', 10, 10], ['ha
   test('bot settlements and debit limit: ' + difficulty, async () => {
     const initial = createService();
     const a = await connect(initial, '단풍');
-    send(initial, a, 'create', { mode: 'bot', size: 9, difficulty });
+    send(initial, a, 'create', { mode: 'bot', size: 19, difficulty });
     const code = initial.view(a.accountId).room.code;
     const baseline = initial.snapshot();
     for (const [humanWon, coins, expected] of [[true, 0, win], [false, 30, -loss], [false, 3, -3], [false, 0, 0]]) {

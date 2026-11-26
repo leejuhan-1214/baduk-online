@@ -7,13 +7,13 @@ function play([x, y]) {
 }
 
 function rotate([x, y], turns) {
-  for (let i = 0; i < turns; i++) [x, y] = [8 - y, x];
+  for (let i = 0; i < turns; i++) [x, y] = [18 - y, x];
   return [x, y];
 }
 
 function position(black, white, turns) {
   assert.equal(black.length, white.length);
-  let game = createGame(9);
+  let game = createGame();
   for (let i = 0; i < black.length; i++) {
     for (const [color, stones] of [[1, black], [2, white]]) {
       game = applyAction(game, color, play(rotate(stones[i], turns)));
@@ -94,7 +94,7 @@ test('connect through a surrounded point when four separate chains share it as a
   const white = [[3,3], [5,3], [3,2], [5,2], [4,1]];
   for (let turns = 0; turns < 4; turns++) {
     const game = position(black, white, turns);
-    const center = play([4,4]);
+    const center = play(rotate([4,4], turns));
     const ignored = applyAction(applyAction(game, 1, { type: 'pass' }), 2, center);
     assert.equal(ignored.captures[2], 2);
     assert.deepEqual(chooseBotAction(game, 'hard', () => 0.5), center);

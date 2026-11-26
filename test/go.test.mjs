@@ -7,7 +7,7 @@ const pass = { type: 'pass' };
 const confirm = { type: 'confirmScore' };
 const mark = (x, y) => ({ type: 'markDead', x, y });
 const next = (game, action) => applyAction(game, game.turn, action);
-const sequence = (actions, size = 9) => actions.reduce(next, createGame(size));
+const sequence = actions => actions.reduce(next, createGame());
 const throwsCode = (fn, code) => assert.throws(fn, error => error.code === code);
 
 function deepFreeze(value) {
@@ -16,20 +16,19 @@ function deepFreeze(value) {
   for (const child of Object.values(value)) deepFreeze(child);
 }
 
-test('supported board sizes, turn validation, integer coordinates and occupied points', () => {
-  for (const size of [9, 13, 19]) {
-    const game = createGame(size);
-    assert.equal(game.board.length, size ** 2);
-    deepFreeze(game);
-    const opened = next(game, play(size - 1, size - 1));
-    assert.equal(opened.board.at(-1), 1);
-    assert.equal(game.board.at(-1), 0);
-    throwsCode(() => next(opened, play(size - 1, size - 1)), 'occupied');
-    throwsCode(() => applyAction(game, 2, play(0, 0)), 'turn');
-    for (const x of [-1, 0.5, size, '2', NaN]) throwsCode(() => next(game, play(x, 0)), 'bounds');
-    throwsCode(() => applyAction(game, 4, pass), 'color');
-  }
-  throwsCode(() => createGame(17), 'size');
+test('new games use 19 lines and validate turn, coordinates and occupancy', () => {
+  const game = createGame();
+  assert.equal(game.size, 19);
+  assert.equal(game.board.length, 361);
+  for (const size of [9, 13, 17, '19', null]) throwsCode(() => createGame(size), 'size');
+  deepFreeze(game);
+  const opened = next(game, play(18, 18));
+  assert.equal(opened.board.at(-1), 1);
+  assert.equal(game.board.at(-1), 0);
+  throwsCode(() => next(opened, play(18, 18)), 'occupied');
+  throwsCode(() => applyAction(game, 2, play(0, 0)), 'turn');
+  for (const x of [-1, 0.5, 19, '2', NaN]) throwsCode(() => next(game, play(x, 0)), 'bounds');
+  throwsCode(() => applyAction(game, 4, pass), 'color');
 });
 
 test('one play takes two distinct chains and leaves the previous state intact', () => {
@@ -39,10 +38,10 @@ test('one play takes two distinct chains and leaves the previous state intact', 
   ]);
   deepFreeze(game);
   const captured = next(game, play(2, 1));
-  assert.equal(captured.board[10], 0);
-  assert.equal(captured.board[12], 0);
+  assert.equal(captured.board[20], 0);
+  assert.equal(captured.board[22], 0);
   assert.equal(captured.captures[1], 2);
-  assert.equal(game.board[10], 2);
+  assert.equal(game.board[20], 2);
   assert.equal(game.captures[1], 0);
 });
 
@@ -69,7 +68,7 @@ test('positional superko survives passes and scoring resumption, and a ko threat
   assert.deepEqual(resumed.confirmed, []);
   throwsCode(() => next(resumed, play(1, 1)), 'superko');
   const recaptured = next(next(next(game, play(8, 0)), play(7, 8)), play(1, 1));
-  assert.equal(recaptured.board[11], 0);
+  assert.equal(recaptured.board[21], 0);
   assert.equal(recaptured.captures[2], 1);
 });
 
@@ -77,11 +76,11 @@ test('area scoring counts stones, single-color empty regions and komi, leaving m
   const position = sequence([play(0, 1), play(8, 8), play(1, 0)]);
   const tally = areaScore(position);
   assert.equal(tally.territory[0], 1);
-  assert.equal(tally.territory[40], 0);
+  assert.equal(tally.territory[180], 0);
   assert.equal(tally.black, 3);
   assert.equal(tally.white, 7.5);
   assert.equal(tally.margin, 4.5);
-  const empty = areaScore(createGame(9));
+  const empty = areaScore(createGame());
   assert.equal(empty.black, 0);
   assert.equal(empty.white, 6.5);
 });
@@ -94,12 +93,12 @@ test('changing an entire dead chain invalidates both approvals until the new sco
   throwsCode(() => applyAction(scoring, 1, mark(2, 3)), 'no_stone');
   const marked = applyAction(accepted, 2, mark(0, 0));
   assert.deepEqual(marked.confirmed, []);
-  assert.deepEqual(marked.dead, [0, 9]);
+  assert.deepEqual(marked.dead, [0, 19]);
   assert.deepEqual(applyAction(marked, 1, mark(0, 1)).dead, []);
-  assert.equal(marked.board[9], 1);
+  assert.equal(marked.board[19], 1);
   const finished = applyAction(applyAction(marked, 2, confirm), 1, confirm);
   assert.equal(finished.phase, 'finished');
-  assert.deepEqual(finished.result, { winner: 2, reason: 'score', black: 0, white: 87.5, margin: 87.5 });
+  assert.deepEqual(finished.result, { winner: 2, reason: 'score', black: 0, white: 367.5, margin: 367.5 });
   throwsCode(() => applyAction(finished, 1, confirm), 'finished');
 });
 

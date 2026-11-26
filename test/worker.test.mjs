@@ -57,7 +57,7 @@ test('D1 transport preserves ordered state, private profiles, command replay and
   assert.equal(b.status, 200);
   const tokenA = a.data.token, tokenB = b.data.token;
   const command = (token, op, fields, id = crypto.randomUUID()) => invoke('/api/command', { type: 'command', id, op, ...fields }, token);
-  const made = await command(tokenA, 'create', { size: 9, mode: 'friend' });
+  const made = await command(tokenA, 'create', { size: 19, mode: 'friend' });
   assert.equal(made.status, 200);
   const code = made.data.events[0].room.code;
   const joined = await command(tokenB, 'join', { code });

@@ -1,6 +1,6 @@
 // Board coordinates start at the upper left. Colors are 1 for black and 2 for white.
 const neighborTables = new Map();
-const sizes = [9, 13, 19];
+export const BOARD_SIZE = 19;
 
 function fail(code, message) {
   const error = new Error(message);
@@ -59,8 +59,8 @@ function actionPoint(game, action) {
   return y * game.size + x;
 }
 
-export function createGame(size = 19) {
-  if (!sizes.includes(size)) fail('size', '9줄, 13줄, 19줄 바둑판을 선택할 수 있습니다.');
+export function createGame(size = BOARD_SIZE) {
+  if (size !== BOARD_SIZE) fail('size', '새 대국은 19줄 바둑판에서 진행합니다.');
   const board = Array(size * size).fill(0);
   return {
     size, board, turn: 1, phase: 'playing', moveNumber: 0, passes: 0,

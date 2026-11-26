@@ -1,4 +1,4 @@
-import { applyAction, chooseBotAction, createGame } from '../shared/go.mjs';
+import { BOARD_SIZE, applyAction, chooseBotAction, createGame } from '../shared/go.mjs';
 
 const BOT = '@bot';
 const BOT_NAMES = { easy: '초급 바둑봇', normal: '중급 바둑봇', hard: '고급 바둑봇' };
@@ -75,7 +75,7 @@ export function createService(snapshot = null) {
     }
     return {
       code: room.code, revision: room.revision, matchId: room.matchId,
-      size: room.size, mode: room.mode, difficulty: room.difficulty,
+      size: room.game?.size ?? BOARD_SIZE, mode: room.mode, difficulty: room.difficulty,
       you: colorOf(room, id), players: { 1: player(1), 2: player(2) },
       game, rematch: [...room.rematch],
     };
@@ -114,7 +114,8 @@ export function createService(snapshot = null) {
 
   function startMatch(room) {
     room.matchId = crypto.randomUUID();
-    room.game = createGame(room.size);
+    room.game = createGame();
+    room.size = room.game.size;
     room.rematch = [];
     room.settled = false;
     room.voteRevision = null;
@@ -122,8 +123,9 @@ export function createService(snapshot = null) {
 
   function createRoom(account, message) {
     if (account.room) reject('already_in_room', '현재 대국방에서 먼저 나가 주세요.');
-    const { mode = 'friend', size = 19, difficulty = 'normal' } = message;
-    if (!['friend', 'bot'].includes(mode) || ![9, 13, 19].includes(size)
+    const { mode = 'friend', size = BOARD_SIZE, difficulty = 'normal' } = message;
+    if (size !== BOARD_SIZE) reject('invalid_settings', '새 대국은 19줄 바둑판에서 진행합니다.');
+    if (!['friend', 'bot'].includes(mode)
       || (mode === 'bot' && !Object.hasOwn(BOT_NAMES, difficulty))) {
       reject('invalid_settings', '대국 설정을 확인해 주세요.');
     }
