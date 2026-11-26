@@ -84,6 +84,29 @@ test('D1 transport preserves ordered state, private profiles, command replay and
   assert.equal(allData.includes(tokenA) || allData.includes(tokenB), false);
   assert.ok(db.sqlite.prepare("SELECT COUNT(*) AS n FROM baduk_entities WHERE kind='accounts'").get().n >= 2);
   assert.ok(db.sqlite.prepare("SELECT COUNT(*) AS n FROM baduk_entities WHERE kind='rooms'").get().n >= 1);
+  // Both clients submit against the same rendered revision while the D1 writers race.
+  const finished = restored.data.room;
+  const rematch = { code, matchId: finished.matchId, revision: finished.revision };
+  const votes = await Promise.all([command(tokenA, 'rematch', rematch), command(tokenB, 'rematch', rematch)]);
+  assert.ok(votes.every(result => result.status === 200));
+  const secondGame = (await invoke('/api/hello', { type: 'hello', token: tokenB })).data.room;
+  assert.equal(secondGame.you, 1);
+  assert.notEqual(secondGame.matchId, finished.matchId);
+  const pass = { code, matchId: secondGame.matchId, action: { type: 'pass' } };
+  await command(tokenB, 'action', { ...pass, revision: secondGame.revision });
+  const scoring = await command(tokenA, 'action', { ...pass, revision: secondGame.revision + 1 });
+  const proposal = scoring.data.events[0].room;
+  const consent = { code, matchId: proposal.matchId, revision: proposal.revision, action: { type: 'confirmScore' } };
+  const confirmationId = crypto.randomUUID();
+  const approvals = await Promise.all([
+    command(tokenA, 'action', consent, confirmationId), command(tokenB, 'action', consent),
+    command(tokenA, 'action', consent, confirmationId),
+  ]);
+  assert.ok(approvals.every(result => result.status === 200));
+  const summary = (await invoke('/api/hello', { type: 'hello', token: tokenA })).data;
+  assert.equal(summary.room.game.phase, 'finished');
+  assert.equal(summary.profile.history.filter(row => row.matchId === proposal.matchId).length, 1);
+  assert.equal(summary.profile.coins, 175);
   await Promise.all(tasks);
   db.sqlite.close();
 });

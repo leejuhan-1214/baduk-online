@@ -111,6 +111,49 @@ test('friend scores transfer the full amount and later bot losses cannot increas
   assert.equal(service.view(a.accountId).profile.history[0].delta, 0);
 });
 
+test('a consent cannot cross a dead-group edit, a resumption, or a match boundary', async () => {
+  const service = createService();
+  const a = await connect(service, '흑');
+  const b = await connect(service, '백');
+  send(service, a, 'create', { size: 9, mode: 'friend' });
+  const code = service.view(a.accountId).room.code;
+  send(service, b, 'join', { code });
+  action(service, a, 'play', { x: 1, y: 1 });
+  action(service, b, 'pass');
+  action(service, a, 'pass');
+  const proposal = service.view(a.accountId).room;
+  const consent = { code, revision: proposal.revision, matchId: proposal.matchId, action: { type: 'confirmScore' } };
+  action(service, b, 'markDead', { x: 1, y: 1 });
+  assert.throws(() => send(service, a, 'action', consent), { code: 'stale_revision' });
+  action(service, b, 'markDead', { x: 1, y: 1 });
+  assert.throws(() => send(service, a, 'action', consent), { code: 'stale_revision' });
+  const changed = { ...consent, revision: service.view(a.accountId).room.revision };
+  action(service, b, 'resume');
+  assert.throws(() => send(service, a, 'action', changed), { code: 'stale_revision' });
+  action(service, b, 'pass');
+  action(service, a, 'pass');
+  assert.throws(() => send(service, a, 'action', changed), { code: 'stale_revision' });
+  const current = { ...consent, revision: service.view(a.accountId).room.revision };
+  send(service, a, 'action', current);
+  assert.throws(() => send(service, b, 'action', { ...current, matchId: null }), { code: 'stale_revision' });
+  assert.throws(() => send(service, b, 'action', { ...current, matchId: crypto.randomUUID() }), { code: 'stale_revision' });
+  for (const type of ['resign', 'markDead', 'resume', 'play']) {
+    assert.throws(() => send(service, b, 'action', { ...current, action: { type, x: 1, y: 1 } }), { code: 'stale_revision' });
+  }
+  const secondId = crypto.randomUUID();
+  send(service, b, 'action', current, secondId);
+  send(service, b, 'action', current, secondId);
+  const finished = service.view(a.accountId).room;
+  assert.equal(finished.game.phase, 'finished');
+  assert.equal(service.view(a.accountId).profile.history.length, 1);
+  const sameResult = { code, revision: finished.revision, matchId: finished.matchId };
+  send(service, a, 'rematch', sameResult);
+  assert.throws(() => send(service, b, 'rematch', { ...sameResult, revision: proposal.revision }), { code: 'stale_revision' });
+  send(service, b, 'rematch', sameResult);
+  assert.notEqual(service.view(a.accountId).room.matchId, finished.matchId);
+  assert.throws(() => send(service, a, 'rematch', sameResult), { code: 'stale_revision' });
+});
+
 test('third account cannot inspect a private room, move, evict players, or impersonate by name', async () => {
   const service = createService();
   const a = await connect(service, '바람');

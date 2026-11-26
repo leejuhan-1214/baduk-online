@@ -16,25 +16,36 @@ const participants = [host, guest];
 const pageErrors = [];
 const forceHttp = process.env.BADUK_BLOCK_WEBSOCKET === '1';
 const allowHttp = forceHttp || process.env.BADUK_ALLOW_HTTP === '1';
+const simultaneous = process.env.BADUK_SIMULTANEOUS === '1';
 
 // Observe the app's actual transport. Duplicate one user-submitted command on demand,
 // preserving its original ID, revision and match. Never record login frames or tokens.
 function instrumentTransport() {
-  const state = window.badukTest = { socket: null, welcomed: false, httpWelcomed: false, duplicate: null, duplicated: null, lastState: null };
+  const state = window.badukTest = { socket: null, welcomed: false, httpWelcomed: false, duplicate: null, duplicated: null, lastState: null, timeline: [] };
   const NativeSocket = window.WebSocket;
   class ObservedSocket extends NativeSocket {
     constructor(...args) {
       super(...args);
       state.socket = this;
+      const start = performance.now();
+      const note = label => state.timeline.push([label, Math.round(performance.now() - start)]);
+      this.addEventListener('open', () => note('open'));
+      this.addEventListener('close', event => note('close ' + event.code));
+      this.addEventListener('error', () => note('error'));
       this.addEventListener('message', event => {
         const message = JSON.parse(event.data);
-        if (message.type === 'welcome') state.welcomed = true;
+        if (message.type === 'welcome') { state.welcomed = true; note('welcome'); }
         if (message.type === 'state') state.lastState = message;
       });
     }
     send(payload) {
-      super.send(payload);
       const msg = JSON.parse(payload);
+      const decision = msg.op === 'action' ? msg.action?.type : msg.op;
+      if (msg.type === 'command' && decision && decision === state.hold) {
+        state.held = msg;
+        return;
+      }
+      super.send(payload);
       if (msg.type === 'command' && msg.op === 'action' && msg.action.type === state.duplicate) {
         state.duplicate = null;
         state.duplicated = msg;
@@ -48,6 +59,10 @@ function instrumentTransport() {
     const path = new URL(typeof input === 'string' ? input : input.url, location.href).pathname;
     const response = await originalFetch(input, init);
     if (path === '/api/hello' && response.ok) state.httpWelcomed = true;
+    if (path === '/api/events' && response.ok) {
+      const batch = await response.clone().json();
+      if (batch.events?.length) state.lastState = batch.events.at(-1);
+    }
     if (path === '/api/command' && init?.body) {
       const msg = JSON.parse(init.body);
       if (msg.op === 'action' && msg.action.type === state.duplicate) {
@@ -94,6 +109,25 @@ async function checkWidth(page) {
 const profile = page => page.evaluate(() => JSON.parse(localStorage.getItem('sudam-go.profile')));
 const duplicateNext = (page, action) => page.evaluate(type => { window.badukTest.duplicate = type; }, action);
 
+async function simultaneousDecision(decision, selector) {
+  // Both browsers click using the same visible board. Hold both outgoing frames
+  // until both UI handlers have built their commands so network speed cannot serialize the clicks.
+  await Promise.all(participants.map(page => page.evaluate(type => {
+    window.badukTest.hold = type;
+    window.badukTest.held = null;
+  }, decision)));
+  await Promise.all(participants.map(page => page.locator(selector).click()));
+  const messages = await Promise.all(participants.map(page => page.evaluate(() => window.badukTest.held)));
+  assert.ok(messages.every(message => message?.id), 'two UI commands were captured');
+  assert.equal(messages[0].code, messages[1].code);
+  assert.equal(messages[0].revision, messages[1].revision, 'both clicks used the very same room revision');
+  assert.equal(messages[0].matchId, messages[1].matchId);
+  await Promise.all(participants.map(page => page.evaluate(() => {
+    window.badukTest.hold = null;
+    window.badukTest.socket.send(JSON.stringify(window.badukTest.held));
+  })));
+}
+
 async function checkLedger(page, won, matchId) {
   const entry = await profile(page);
   assert.equal(entry.coins, won ? 165 : 35);
@@ -131,6 +165,7 @@ try {
   assert.notEqual((await profile(host)).id, (await profile(guest)).id);
   const transports = await Promise.all(participants.map(page => page.evaluate(() => window.badukTest.welcomed ? 'WebSocket' : window.badukTest.httpWelcomed ? 'HTTP' : 'unknown')));
   assert.ok(transports.every(t => t === 'WebSocket' || (allowHttp && t === 'HTTP')), `online transports: ${transports.join(', ')}`);
+  if (simultaneous) assert.deepEqual(transports, ['WebSocket', 'WebSocket']);
 
   await duplicateNext(host, 'play');
   await playPoint(host, 2, 2);
@@ -184,11 +219,17 @@ try {
   await guest.locator('#pass').click();
   await Promise.all(participants.map(page => page.locator('#scoringControls').waitFor({ state: 'visible' })));
   assert.ok(await guest.evaluate(() => { window.badukTest.stopObserving?.(); return !window.badukTest.rollback; }), 'late state rolled back the board');
-  await guest.locator('#confirmScore').click();
-  await waitText(guest, '#statusText', '기다립니다');
-  assert.equal((await profile(guest)).history.length, 0);
   await duplicateNext(host, 'confirmScore');
-  await host.locator('#confirmScore').click();
+  if (simultaneous) {
+    await duplicateNext(guest, 'confirmScore');
+    await simultaneousDecision('confirmScore', '#confirmScore');
+  } else {
+    await guest.locator('#confirmScore').click();
+    await waitText(guest, '#statusText', '기다립니다');
+    await host.waitForFunction(() => window.badukTest.lastState?.room?.game.confirmed.includes(2));
+    assert.equal((await profile(guest)).history.length, 0);
+    await host.locator('#confirmScore').click();
+  }
   await Promise.all(participants.map(page => waitText(page, '#statusText', '백 6.5집 승')));
   const finalCommand = await host.evaluate(() => window.badukTest.duplicated);
   assert.equal(finalCommand.action.type, 'confirmScore');
@@ -199,9 +240,14 @@ try {
   await waitText(host, '#historyList', '-65코인');
   await host.locator('#historyDialog .modal-close').click();
 
-  await host.locator('#rematch').click();
-  await waitText(host, '#rematch', '기다리는 중');
-  await guest.locator('#rematch').click();
+  if (simultaneous) {
+    await simultaneousDecision('rematch', '#rematch');
+  } else {
+    await host.locator('#rematch').click();
+    await waitText(host, '#rematch', '기다리는 중');
+    await guest.waitForFunction(() => window.badukTest.lastState?.room?.rematch.includes(1));
+    await guest.locator('#rematch').click();
+  }
   await Promise.all(participants.map(page => waitMove(page, 0)));
   await waitTurn(guest, '흑');
   await waitText(host, '#blackName', '백돌 검증');
@@ -230,12 +276,14 @@ try {
     assert.equal(await guest.locator('#modeTag').textContent(), '연습 대국', 'late state reopened the closed room');
   }
   assert.deepEqual(pageErrors, []);
-  console.log(JSON.stringify({ site: site.href, transports, room: 'created, joined, restored, rematched, closed', settlement: { margin: 6.5, debit: 65, credit: 65, copiesPerAccount: 1 }, mobileWidth: 360 }));
+  console.log(JSON.stringify({ site: site.href, transports, room: 'created, joined, restored, rematched, closed', simultaneous, settlement: { margin: 6.5, debit: 65, credit: 65, copiesPerAccount: 1 }, mobileWidth: 360 }));
 } catch (error) {
   for (const [i, page] of participants.entries()) {
     const status = await page.locator('#statusText').textContent({ timeout: 1500 }).catch(() => '');
     const setup = await page.locator('#setupStatus').textContent({ timeout: 1500 }).catch(() => '');
-    console.error(`Browser ${i + 1}: ${status} ${setup}`);
+    const toast = await page.locator('#toast').textContent({ timeout: 1500 }).catch(() => '');
+    const timeline = await page.evaluate(() => window.badukTest?.timeline).catch(() => []);
+    console.error(`Browser ${i + 1}: ${status} ${setup} ${toast} ${JSON.stringify(timeline)}`);
   }
   throw error;
 } finally {

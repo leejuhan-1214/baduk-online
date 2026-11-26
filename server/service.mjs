@@ -117,6 +117,7 @@ export function createService(snapshot = null) {
     room.game = createGame(room.size);
     room.rematch = [];
     room.settled = false;
+    room.voteRevision = null;
   }
 
   function createRoom(account, message) {
@@ -159,10 +160,14 @@ export function createService(snapshot = null) {
   function roomForCommand(account, message) {
     const room = lookupRoom(message.code);
     if (account.room !== room.code || !colorOf(room, account.id)) reject('not_member', '이 대국방의 참여자만 진행할 수 있습니다.');
-    if (message.revision !== room.revision || (message.matchId != null && message.matchId !== room.matchId)) {
-      reject('stale_revision', '대국 상태가 바뀌었습니다. 최신 바둑판에서 다시 시도해 주세요.');
-    }
-    return room;
+    if (message.revision === room.revision && (message.matchId == null || message.matchId === room.matchId)) return room;
+
+    const scoringVote = message.op === 'action' && message.action?.type === 'confirmScore' && room.game?.phase === 'scoring';
+    const rematchVote = message.op === 'rematch' && room.game?.phase === 'finished';
+    if ((scoringVote || rematchVote) && typeof room.matchId === 'string' && message.matchId === room.matchId
+      && Number.isSafeInteger(message.revision) && Number.isSafeInteger(room.voteRevision)
+      && message.revision >= room.voteRevision && message.revision < room.revision) return room;
+    reject('stale_revision', '대국 상태가 바뀌었습니다. 최신 바둑판에서 다시 시도해 주세요.');
   }
 
   function settle(room) {
@@ -203,9 +208,14 @@ export function createService(snapshot = null) {
 
   function play(room, color, action) {
     if (!room.game) reject('waiting_for_guest', '상대가 입장하면 대국을 시작합니다.');
+    const previousPhase = room.game.phase;
     room.game = applyAction(room.game, color, action);
     settle(room);
     room.revision++;
+    // The players may vote concurrently only while the exact proposal they saw still exists.
+    if (room.game.phase !== previousPhase || action.type === 'markDead') {
+      room.voteRevision = room.game.phase === 'playing' ? null : room.revision;
+    }
   }
 
   function rematch(room, color) {
