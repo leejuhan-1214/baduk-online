@@ -11,15 +11,19 @@ const worker = await readFile(path.join(root, 'dist/server/index.js'), 'utf8');
 const types = { html: 'text/html; charset=utf-8', mjs: 'text/javascript; charset=utf-8', css: 'text/css; charset=utf-8' };
 const dev = new Miniflare({
   host: '127.0.0.1', port: Number(process.env.BADUK_PORT || 4189),
-  modules: true, compatibilityDate: '2026-04-01',
+  modulesRoot: root, compatibilityDate: '2026-04-01',
   d1Databases: ['DB'], d1Persist: path.join(root, '.baduk-data'),
-  script: worker.replace(/export\s*\{([^}]+)\}\s*;?\s*$/, (match, exports) => {
-    const original = exports.match(/(\w+) as default/)[1];
-    return `const development = {fetch(req, env, ctx) {
-      const p = new URL(req.url).pathname;
-      return p === '/ws' || p === '/health' || p.startsWith('/api/') ? ${original}.fetch(req, env, ctx) : env.UI.fetch(req);
-    }}; export default development;`;
-  }),
+  modules: [
+    {
+      type: 'ESModule', path: path.join(root, 'development.js'),
+      contents: `import worker from './worker.js';
+        export default { fetch(req, env, ctx) {
+          const p = new URL(req.url).pathname;
+          return p === '/ws' || p === '/health' || p.startsWith('/api/') ? worker.fetch(req, env, ctx) : env.UI.fetch(req);
+        }};`,
+    },
+    { type: 'ESModule', path: path.join(root, 'worker.js'), contents: worker },
+  ],
   serviceBindings: {
     UI: async req => {
       const filename = new URL(req.url).pathname.slice(1) || 'index.html';

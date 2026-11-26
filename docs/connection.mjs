@@ -9,6 +9,7 @@ export function createConnection({ onState, onStatus, onError }) {
   let token = read(localStorage,accountKey), socket = null, ready = false, wanted = false, fatal = false;
   let retryTimer, timer, pingTimer, pongTimer, tries=0, name='', status='idle';
   let httpActive=false, generation=0, cursor=0, nextHttp=false;
+  let accountId=null, lastAcceptedCursor=-1;
   const httpOrigin=WS_URL ? new URL(WS_URL,location.href).origin.replace(/^ws/,'http') : '';
   const waiters=new Set(), pending=new Map();
   try {
@@ -25,10 +26,18 @@ export function createConnection({ onState, onStatus, onError }) {
     else entry.resolve?.();
     onStatus(status);
   }
+  function acceptState(message, isWelcome=false) {
+    const id=message.profile?.id, position=message.cursor;
+    if(!id || !Number.isSafeInteger(position) || position<0)return;
+    if(isWelcome&&id!==accountId){accountId=id;lastAcceptedCursor=-1;}
+    if(id!==accountId || position<lastAcceptedCursor || (!isWelcome&&position===lastAcceptedCursor))return;
+    lastAcceptedCursor=position;
+    onState(message,isWelcome);
+  }
   function welcome(message) {
     ready=true;tries=0;
     if(message.token){token=message.token;write(localStorage,accountKey,token);}
-    onState(message,true);updateStatus('ready');
+    acceptState(message,true);updateStatus('ready');
     for(const entry of pending.values()) transmit(entry.command);
     for(const waiter of waiters)waiter.resolve();waiters.clear();
   }
@@ -68,7 +77,7 @@ export function createConnection({ onState, onStatus, onError }) {
       while(httpActive&&epoch===generation){
         const page=await request('/api/events?after='+cursor+'&wait=15','GET',null,23000);
         if(epoch!==generation)return;
-        for(const state of page.events||[]){if(state.type==='state')onState(state,false);}
+        for(const state of page.events||[]){if(state.type==='state')acceptState(state);}
         cursor=Math.max(cursor,page.cursor||0);
       }
     }catch(e){
@@ -115,7 +124,7 @@ export function createConnection({ onState, onStatus, onError }) {
         },18000);
       } else if(msg.type==='pong'){
         clearTimeout(pongTimer);
-      } else if(msg.type==='state' && ready) onState(msg,false);
+      } else if(msg.type==='state' && ready) acceptState(msg);
       else if(msg.type==='ack') settled(msg.id);
       else if(msg.type==='error'){
         const error=Object.assign(new Error(msg.message || '요청을 처리할 수 없습니다.'),{code:msg.code});

@@ -14,7 +14,8 @@ const host = await desktop.newPage();
 const guest = await mobile.newPage();
 const participants = [host, guest];
 const pageErrors = [];
-const allowHttp = process.env.BADUK_ALLOW_HTTP === '1';
+const forceHttp = process.env.BADUK_BLOCK_WEBSOCKET === '1';
+const allowHttp = forceHttp || process.env.BADUK_ALLOW_HTTP === '1';
 
 // Observe the app's actual transport. Duplicate one user-submitted command on demand,
 // preserving its original ID, revision and match. Never record login frames or tokens.
@@ -107,6 +108,7 @@ try {
   await Promise.all(participants.map(async page => {
     page.setDefaultTimeout(25000);
     page.on('pageerror', error => { pageErrors.push(error.message); });
+    if (forceHttp) await page.routeWebSocket('**/ws', route => route.close({ code: 1001 }));
     await page.addInitScript(instrumentTransport);
     await page.goto(site.href, { waitUntil: 'domcontentloaded', timeout: 45000 });
     await waitTurn(page, '흑');
@@ -216,10 +218,17 @@ try {
   await host.locator('#resign').click();
   await host.locator('#confirmYes').click();
   await Promise.all(participants.map(page => waitText(page, '#statusText', '흑 불계승')));
+  const closedRoomState = await guest.evaluate(() => window.badukTest.lastState);
   await host.locator('#settingsOpen').click();
   await host.locator('[data-mode="practice"]').click();
   await host.locator('#createGame').click();
   await Promise.all(participants.map(page => waitText(page, '#modeTag', '연습 대국')));
+  if (closedRoomState && transports[1] === 'WebSocket') {
+    await guest.evaluate(stale => {
+      window.badukTest.socket.dispatchEvent(new MessageEvent('message', { data: JSON.stringify(stale) }));
+    }, closedRoomState);
+    assert.equal(await guest.locator('#modeTag').textContent(), '연습 대국', 'late state reopened the closed room');
+  }
   assert.deepEqual(pageErrors, []);
   console.log(JSON.stringify({ site: site.href, transports, room: 'created, joined, restored, rematched, closed', settlement: { margin: 6.5, debit: 65, credit: 65, copiesPerAccount: 1 }, mobileWidth: 360 }));
 } catch (error) {
