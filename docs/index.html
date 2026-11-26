@@ -1,0 +1,84 @@
+<!doctype html>
+<html lang="ko">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <meta name="theme-color" content="#172d28">
+  <title>수담기원 · 온라인 바둑</title>
+  <meta name="description" content="친구와 실시간으로 바둑을 두거나 봇과 연습하는 온라인 기원입니다.">
+  <link rel="stylesheet" href="./style.css">
+  <script type="module" src="./app.mjs"></script>
+</head>
+<body>
+  <svg class="symbols" aria-hidden="true" xmlns="http://www.w3.org/2000/svg"><defs>
+    <symbol id="i-board" viewBox="0 0 24 24"><rect x="3" y="3" width="18" height="18" rx="2"/><path d="M9 3v18m6-18v18M3 9h18M3 15h18"/></symbol>
+    <symbol id="i-log" viewBox="0 0 24 24"><path d="M6 4h13v16H6a2 2 0 0 1-2-2V6a2 2 0 0 1 2-2Zm0 12h13M8 8h7m-7 4h5"/></symbol>
+    <symbol id="i-info" viewBox="0 0 24 24"><circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-9v1"/></symbol>
+    <symbol id="i-friend" viewBox="0 0 24 24"><circle cx="9" cy="8" r="3"/><path d="M3 20v-2a6 6 0 0 1 12 0v2m3-3v-2m0-8v6m-3-3h6"/></symbol>
+    <symbol id="i-settings" viewBox="0 0 24 24"><path d="M3 7h5m4 0h9M3 17h11m4 0h3"/><circle cx="10" cy="7" r="2"/><circle cx="16" cy="17" r="2"/></symbol>
+    <symbol id="i-sound" viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4zM16 8a6 6 0 0 1 0 8m2-11a10 10 0 0 1 0 14"/></symbol>
+    <symbol id="i-mute" viewBox="0 0 24 24"><path d="M4 9h4l5-4v14l-5-4H4zm13 0 5 6m0-6-5 6"/></symbol>
+    <symbol id="i-pass" viewBox="0 0 24 24"><path d="M4 17v-3a5 5 0 0 1 5-5h10m-5-5 5 5-5 5"/></symbol>
+    <symbol id="i-flag" viewBox="0 0 24 24"><path d="M5 21V4c4-3 8 3 14 0v10c-6 3-10-3-14 0"/></symbol>
+    <symbol id="i-close" viewBox="0 0 24 24"><path d="m6 6 12 12M18 6 6 18"/></symbol>
+    <symbol id="i-copy" viewBox="0 0 24 24"><rect x="8" y="8" width="12" height="12" rx="2"/><path d="M16 8V4H4v12h4"/></symbol>
+    <symbol id="i-stones" viewBox="0 0 24 24"><ellipse cx="9" cy="8" rx="6" ry="5"/><path d="M3 8v3c0 3 4 5 7 5"/><ellipse cx="15" cy="15" rx="6" ry="5"/><path d="M9 15v2c0 3 3 5 6 5s6-2 6-5v-2"/></symbol>
+  </defs></svg>
+  <header class="site-header"><div class="shell mast">
+    <a class="brand" href="./" aria-label="수담기원 대국실"><span class="seal" aria-hidden="true"><i></i><b></b></span><span>수담기원</span></a>
+    <nav aria-label="주 메뉴"><button class="nav-current" id="homeNav" aria-current="page">대국실</button><button id="historyNav">대국 기록</button><button id="guideNav">이용 안내</button></nav>
+    <button id="friendQuick" class="invite"><svg><use href="#i-friend"/></svg>친구 대국</button>
+  </div></header>
+  <main class="shell">
+    <div class="intro"><div><p class="eyebrow"><span></span>SUDAM GO CLUB</p><h1>바둑 대국실<span class="title-point">.</span></h1></div>
+      <button class="secondary setting-open" id="settingsOpen"><svg><use href="#i-settings"/></svg>대국 설정</button>
+    </div>
+    <div class="layout">
+      <section class="board-card" aria-label="바둑판">
+        <div class="board-heading"><div class="board-title"><span class="board-icon"><svg><use href="#i-board"/></svg></span><h2>대국판</h2><span class="size-tag" id="boardSize">13줄</span></div>
+          <button class="icon-btn" id="soundButton" aria-label="착수 소리 끄기" title="착수 소리 끄기" aria-pressed="true"><svg><use href="#i-sound"/></svg></button>
+        </div>
+        <div class="board-surround"><div class="board-frame"><canvas id="board" tabindex="0" role="application" aria-label="바둑판. 방향키로 이동하고 Enter로 착수하세요."></canvas></div></div>
+        <div class="board-foot"><span><i class="last-symbol"></i>마지막 착수</span><span id="boardFoot">면적 계가 · 백 덤 6.5집</span></div>
+      </section>
+      <aside class="panel-stack" aria-label="대국 정보">
+        <section class="match-card">
+          <div class="panel-head"><div><p class="eyebrow muted">MATCH ROOM</p><h2>대국 현황</h2></div><span class="mode-tag" id="modeTag">연습 대국</span></div>
+          <div class="seats">
+            <div class="seat" id="seatBlack"><span class="stone-figure black"></span><div><b id="blackName">나</b><small>흑돌</small></div><span class="turn-mark">차례</span></div>
+            <div class="seat" id="seatWhite"><span class="stone-figure white"></span><div><b id="whiteName">연습 봇</b><small>백돌</small></div><span class="turn-mark">차례</span></div>
+          </div>
+          <div class="match-status"><span class="signal" id="signal"></span><strong id="statusText" role="status">흑돌을 놓을 차례입니다.</strong></div>
+          <div class="metrics"><div><small>진행 수</small><b id="moves">0<small>수</small></b></div><div><small>흑이 잡은 돌</small><b id="blackCaptures">0<small>개</small></b></div><div><small>백이 잡은 돌</small><b id="whiteCaptures">0<small>개</small></b></div></div>
+          <p class="notice" id="phaseNote" hidden></p>
+          <div class="actions"><button id="pass"><svg><use href="#i-pass"/></svg>한 수 쉼</button><button id="resign"><svg><use href="#i-flag"/></svg>기권</button></div>
+          <div class="actions" id="scoringControls" hidden><button id="confirmScore">계가 동의</button><button id="resume">대국 재개</button></div>
+          <button id="rematch" class="full-action" hidden>재대전 신청</button>
+          <div class="room-strip" id="roomStrip" hidden><span>방 코드 <b id="roomCode"></b></span><button id="copyRoom" title="초대 링크 복사"><svg><use href="#i-copy"/></svg>초대 링크</button></div>
+        </section>
+        <section class="record-card"><div class="record-heading"><div><span class="record-icon"><svg><use href="#i-log"/></svg></span><h2>최근 착수</h2></div><span id="logCount">0수</span></div>
+          <ol id="moveLog" aria-label="최근 착수"></ol>
+          <div id="emptyLog" class="empty-log"><span class="mini-stone"></span><p>첫 수를 기다리고 있습니다.</p></div>
+        </section>
+      </aside>
+    </div>
+    <footer><span class="footer-brand">수담기원</span><span>온라인 바둑</span></footer>
+  </main>
+  <dialog id="settingsDialog" aria-labelledby="settingsTitle"><div class="modal-head"><div><p class="eyebrow"><span></span>MATCH SETUP</p><h2 id="settingsTitle">대국 설정</h2></div><button class="modal-close icon-btn" aria-label="닫기"><svg><use href="#i-close"/></svg></button></div>
+    <div class="modes" role="group" aria-label="대국 방식"><button data-mode="practice">연습</button><button data-mode="bot">봇 대국</button><button data-mode="friend">친구 대국</button></div>
+    <p class="mode-help" id="setupHelp"></p>
+    <div id="onlineFields"><label for="nickname">대국 이름</label><input id="nickname" maxlength="20" autocomplete="nickname" placeholder="이름 입력"></div>
+    <fieldset><legend>바둑판 크기</legend><div class="choice-row" id="sizes"><button data-value="9">9줄</button><button data-value="13">13줄</button><button data-value="19">19줄</button></div></fieldset>
+    <fieldset id="levelsField"><legend>봇 난이도</legend><div class="choice-row" id="levels"><button data-value="easy">쉬움</button><button data-value="normal">보통</button><button data-value="hard">어려움</button></div></fieldset>
+    <button class="primary wide" id="createGame">새 대국 시작</button>
+    <div class="join-field" id="joinField"><label for="joinCode">친구의 방에 입장</label><div><input id="joinCode" placeholder="방 코드" maxlength="12" autocapitalize="characters" autocomplete="off" spellcheck="false"><button class="secondary" id="joinGame">입장</button></div></div>
+    <p id="setupStatus" class="form-status" role="status"></p>
+  </dialog>
+  <dialog id="historyDialog" aria-labelledby="historyTitle"><div class="modal-head"><div><p class="eyebrow"><span></span>MATCH HISTORY</p><h2 id="historyTitle">대국 기록</h2></div><button class="modal-close icon-btn" aria-label="닫기"><svg><use href="#i-close"/></svg></button></div><div id="profileStats"></div><ul id="historyList" class="history-list"></ul></dialog>
+  <dialog id="guideDialog" aria-labelledby="guideTitle"><div class="modal-head"><div><p class="eyebrow"><span></span>HOW TO PLAY</p><h2 id="guideTitle">이용 안내</h2></div><button class="modal-close icon-btn" aria-label="닫기"><svg><use href="#i-close"/></svg></button></div>
+    <div class="guide"><h3>돌 놓기와 따내기</h3><p>흑부터 비어 있는 교차점에 한 수씩 둡니다. 가로·세로로 연결된 돌의 활로가 모두 막히면 상대가 그 돌을 따냅니다. 자살수와 이전 판 모양을 되풀이하는 착수는 금지됩니다.</p><h3>대국 종료와 계가</h3><p>두 기사가 연속으로 한 수 쉬면 계가에 들어갑니다. 죽은 무리를 눌러 표시한 뒤 두 사람 모두 계가에 동의하세요. 의견이 다르면 대국을 재개할 수 있습니다. 살아 있는 돌과 둘러싼 빈 점을 합산하고 백에게 덤 6.5집을 더합니다.</p><h3>친구 대국과 재접속</h3><p>친구 대국에서 방을 만들고 초대 링크나 방 코드를 공유하세요. 같은 브라우저로 다시 열면 온라인 계정과 대국을 복구합니다.</p><h3>대국별 가상 코인 정산</h3><p>연습 대국은 무료입니다. 친구 대국에서는 집 차이당 10코인을 패자가 승자에게 지급하며, 기권은 10코인입니다. 패자의 잔액은 음수가 될 수 있습니다.</p><p>봇 대국에서 이기면 쉬움·보통·어려움 순서로 5·10·20코인을 받습니다. 패배하면 각각 10·10·20코인을 보유한 코인까지만 차감하며, 잔액이 0 이하이면 차감액은 0코인입니다.</p><h3>키보드 조작</h3><p>바둑판에 초점을 둔 뒤 방향키로 교차점을 이동하고 Enter 또는 스페이스로 선택하세요.</p></div>
+  </dialog>
+  <dialog id="confirmDialog" aria-labelledby="confirmTitle"><div class="modal-head"><h2 id="confirmTitle">기권하시겠어요?</h2><button class="modal-close icon-btn" aria-label="닫기"><svg><use href="#i-close"/></svg></button></div><p id="confirmText" class="mode-help"></p><div class="confirm-actions"><button class="secondary" id="confirmCancel">취소</button><button class="primary" id="confirmYes">기권</button></div></dialog>
+  <div id="toast" class="toast" role="status" hidden></div>
+</body>
+</html>
