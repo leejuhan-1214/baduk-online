@@ -131,6 +131,54 @@ export function areaScore(game) {
   return { black, white, margin: Math.abs(black - white), winner: black > white ? 1 : 2, territory };
 }
 
+function botScoreVote(game, color) {
+  const adjacent = neighbors(game.size);
+  const checked = new Set();
+  function tryPlay(position, player, point) {
+    try {
+      return playStone(position, player, { x: point % game.size, y: Math.floor(point / game.size) });
+    } catch (error) {
+      if (error.code === 'suicide' || error.code === 'superko') return null;
+      throw error;
+    }
+  }
+  function canTakeCleanly(position, stone, group) {
+    if (group.liberties.size !== 1) return false;
+    const liberty = group.liberties.values().next().value;
+    const after = tryPlay(position, 3 - color, liberty);
+    // A ko or snapback still has to be resolved on the board.
+    return after !== null && after.board[stone] === 0 && chain(after.board, adjacent, liberty).liberties.size > 1;
+  }
+  for (const stone of game.dead) {
+    if (game.board[stone] !== color || checked.has(stone)) continue;
+    const group = chain(game.board, adjacent, stone);
+    for (const member of group.stones) checked.add(member);
+    let defensible = !canTakeCleanly(game, stone, group);
+    if (!defensible) {
+      // An atari can be escaped by extending or by capturing a touching enemy chain.
+      const defenses = new Set(group.liberties);
+      const examinedEnemies = new Set();
+      for (const member of group.stones) {
+        for (const point of adjacent[member]) {
+          if (game.board[point] !== 3 - color || examinedEnemies.has(point)) continue;
+          const enemy = chain(game.board, adjacent, point);
+          for (const enemyStone of enemy.stones) examinedEnemies.add(enemyStone);
+          if (enemy.liberties.size === 1) defenses.add(enemy.liberties.values().next().value);
+        }
+      }
+      for (const defense of defenses) {
+        const after = tryPlay(game, color, defense);
+        if (after && !canTakeCleanly(after, stone, chain(after.board, adjacent, stone))) {
+          defensible = true;
+          break;
+        }
+      }
+    }
+    if (defensible) return { type: 'markDead', x: stone % game.size, y: Math.floor(stone / game.size) };
+  }
+  return { type: 'confirmScore' };
+}
+
 function scoringAction(game, color, action) {
   const lastMove = { type: action.type, color };
   if (action.type === 'resume') {
@@ -206,56 +254,241 @@ function distanceTo(board, adjacent, color) {
   return distance;
 }
 
-function rankMove(index, context) {
-  const { game, color, groups, adjacent, myDistance, enemyDistance, ownership, level, rng } = context;
-  const x = index % game.size, y = Math.floor(index / game.size);
-  const edgeX = Math.min(x, game.size - 1 - x), edgeY = Math.min(y, game.size - 1 - y);
-  const contacts = new Set(adjacent[index].map(point => groups[point]).filter(Boolean));
-  const liberties = new Set(adjacent[index].filter(point => !game.board[point]));
-  let captured = 0, saved = 0, attacked = 0;
-  for (const group of contacts) {
-    if (group.color === color) {
-      for (const liberty of group.liberties) if (liberty !== index) liberties.add(liberty);
-      if (group.liberties.size === 1) saved += group.stones.length;
-    } else if (group.liberties.size === 1) captured += group.stones.length;
-    else if (group.liberties.size === 2) attacked += group.stones.length;
+const searchLevels = {
+  easy:   { width: 4, depth: 3, nodes: 12, noise: 10 },
+  normal: { width: 7, depth: 9, nodes: 34, noise: 3 },
+  hard:   { width: 10, depth: 22, nodes: 68, noise: 0.8 },
+};
+
+function trueEye(board, size, adjacent, point, color) {
+  if (!adjacent[point].every(neighbor => board[neighbor] === color)) return false;
+  const x = point % size, y = Math.floor(point / size);
+  let hostile = 0;
+  for (const dx of [-1, 1]) for (const dy of [-1, 1]) {
+    if (x + dx < 0 || x + dx >= size || y + dy < 0 || y + dy >= size) continue;
+    if (board[(y + dy) * size + x + dx] === 3 - color) hostile++;
   }
-  if (!captured && !liberties.size) return null;
-  if (!captured && liberties.size < 2 && !saved) return null;
-  if (ownership[index] === color && !captured && !saved) return null;
-  const starLine = game.size === 9 ? 2 : 3;
-  const opening = game.moveNumber < game.size;
-  const corner = Math.abs(edgeX - starLine) + Math.abs(edgeY - starLine);
-  const nearest = Math.min(myDistance[index], enemyDistance[index]);
-  const spread = Math.min(nearest, 5);
-  const edge = Math.min(edgeX, edgeY);
-  const noise = [20, 5, 1.8][level] * rng();
-  let score = noise + spread + Math.min(edge, 3) - (opening ? corner * 1.5 : 0);
-  if (game.moveNumber > 0 && myDistance[index] >= 2 && myDistance[index] <= 4) score += 3;
-  if (!opening && enemyDistance[index] <= 2 && myDistance[index] <= 3) score += 4;
-  const urgency = [5, 13, 20][level];
-  score += urgency * captured + urgency * 0.8 * saved + Math.min(attacked, 6) * [0.5, 2.2, 3.8][level];
-  if (!captured && liberties.size === 1) score -= urgency * (saved + 2);
-  if (!captured && liberties.size === 2 && enemyDistance[index] === 1) score -= level * 2;
-  return { action: { type: 'play', x, y }, score, captured, saved };
+  return hostile < (adjacent[point].length === 4 ? 2 : 1);
+}
+
+// Rank the entire board once. Read only the most promising variations afterwards.
+function rankMove(index, context) {
+  const { game, color, groups, adjacent, myDistance, enemyDistance, ownership, opening, tuning, rng } = context;
+  const { size, board } = game;
+  const enemy = 3 - color;
+  const contacts = [];
+  let open = 0;
+  for (const point of adjacent[index]) {
+    const group = groups[point];
+    if (!group) open++;
+    else if (!contacts.includes(group)) contacts.push(group);
+  }
+  let captured = 0, saved = 0, attacked = 0, pressured = 0, friendly = 0, friendlyWeak = 0;
+  let escapeSpace = open;
+  const newAtaris = [];
+  for (const group of contacts) {
+    const libs = group.liberties.size, count = group.stones.length;
+    if (group.color === color) {
+      friendly++;
+      if (libs <= 3) friendlyWeak++;
+      if (libs === 1) saved += count;
+      escapeSpace = Math.max(escapeSpace, libs - 1);
+    } else if (libs === 1) captured += count;
+    else if (libs === 2) { attacked += Math.min(count, 5); newAtaris.push(group); }
+    else if (libs === 3) pressured += Math.min(count, 4);
+  }
+  const emergencyConnection = saved > 0 && friendly > 1;
+  if (!captured && !open && !emergencyConnection && trueEye(board, size, adjacent, index, color)) return null;
+  if (!captured && !escapeSpace && friendly <= 1) return null;
+  if (!captured && !saved && !attacked && escapeSpace <= 1 && friendly <= 1) return null;
+  if (!captured && !saved && !attacked && ownership[index] === color && !opening) return null;
+  if (!captured && !saved && !attacked && ownership[index] === enemy && trueEye(board, size, adjacent, index, enemy)) return null;
+
+  const x = index % size, y = Math.floor(index / size);
+  const edgeX = Math.min(x, size - 1 - x), edgeY = Math.min(y, size - 1 - y);
+  const edge = Math.min(edgeX, edgeY), farEdge = Math.max(edgeX, edgeY);
+  const mine = myDistance[index], theirs = enemyDistance[index], nearest = Math.min(mine, theirs);
+  const cornerLine = size === 9 ? 2 : 3;
+  let shape = 0;
+  if (opening) {
+    // Take open corners first. Approach and extend along the third/fourth lines.
+    const cornerGap = Math.abs(edgeX - cornerLine) + Math.abs(edgeY - cornerLine);
+    shape += 9 - Math.min(13, 2.3 * cornerGap) + 1.8 * Math.min(nearest, 6);
+    if (farEdge > cornerLine + 1 && (edge === 2 || edge === 3)) shape += 3;
+    if (nearest < 3) shape -= (3 - nearest) * 4;
+    if (edge === 0) shape -= 9;
+    if (edge === 1) shape -= 5;
+  } else {
+    // Extend toward open space from friendly strength, especially at a contested boundary.
+    shape += 5 - Math.min(7, Math.abs(mine - 3));
+    shape += 4 - Math.min(6, Math.abs(theirs - 3));
+    if (ownership[index] === enemy && mine > 3) shape -= 10;
+    if (edge === 0 && open > 1 && !attacked) shape -= 4;
+  }
+  if (mine === 1 && friendly === 1 && !friendlyWeak) shape -= 4;
+  if (friendly >= 2) shape += friendlyWeak ? 7 : 2;
+  if (friendlyWeak && escapeSpace >= 3 && theirs <= 2) shape += 4;
+  if (open <= 1 && !captured && !friendly) shape -= 11;
+  if (myDistance[index] === 2 && enemyDistance[index] === 2) shape += 2;
+  // A corner-opening preference must not push an urgent edge capture outside the reading beam.
+  if (captured || saved) shape = Math.max(-2, Math.min(4, shape)) + 5;
+  const counterPriority = context.counterPriority[index];
+  const score = shape + tuning.noise * rng() + 23 * captured + 17 * saved + counterPriority
+    + 3.3 * attacked + 1.15 * pressured + (newAtaris.length > 1 ? 13 : 0);
+  return { index, score, captured, saved, newAtaris, counterPriority };
+}
+
+// Short local variations use the same capture, suicide and positional-superko rules as playStone.
+// Stamped arrays avoid allocating two Sets each time a hypothetical chain is inspected.
+function tacticalReader(game, adjacent) {
+  const stonesSeen = new Uint32Array(game.board.length), libertiesSeen = new Uint32Array(game.board.length);
+  const previous = new Set(game.history);
+  previous.add(positionKey(game.board));
+  let stamp = 0;
+
+  function inspect(board, start) {
+    const tag = ++stamp;
+    const stones = [start], liberties = [];
+    const color = board[start];
+    stonesSeen[start] = tag;
+    for (let i = 0; i < stones.length; i++) {
+      for (const point of adjacent[stones[i]]) {
+        if (!board[point] && libertiesSeen[point] !== tag) {
+          libertiesSeen[point] = tag;
+          liberties.push(point);
+        } else if (board[point] === color && stonesSeen[point] !== tag) {
+          stonesSeen[point] = tag;
+          stones.push(point);
+        }
+      }
+    }
+    return { stones, liberties };
+  }
+
+  function move(board, point, color, path) {
+    if (board[point]) return null;
+    const next = board.slice();
+    next[point] = color;
+    for (const neighbor of adjacent[point]) {
+      if (next[neighbor] !== 3 - color || adjacent[neighbor].some(n => !next[n])) continue;
+      const enemy = inspect(next, neighbor);
+      if (!enemy.liberties.length) for (const stone of enemy.stones) next[stone] = 0;
+    }
+    if (!adjacent[point].some(n => !next[n]) && !inspect(next, point).liberties.length) return null;
+    const key = positionKey(next);
+    if (previous.has(key) || path.includes(key)) return null;
+    return { board: next, key };
+  }
+
+  // A forcing capture is proven only if every legal extension and adjacent countercapture fails.
+  // 1 means capture proven, -1 means escape from the forcing sequence, 0 means unresolved.
+  function read(board, anchor, defender, turn, depth, budget, path) {
+    if (board[anchor] !== defender) return 1;
+    const group = inspect(board, anchor);
+    const count = group.liberties.length;
+    if (count >= 3) return -1;
+    if (!depth || !budget.left) return 0;
+    const attack = turn !== defender;
+    const choices = group.liberties.slice();
+    if (!attack) {
+      const examined = new Set();
+      for (const stone of group.stones) for (const neighbor of adjacent[stone]) {
+        if (board[neighbor] !== 3 - defender || examined.has(neighbor)) continue;
+        const attacker = inspect(board, neighbor);
+        for (const member of attacker.stones) examined.add(member);
+        if (attacker.liberties.length === 1 && !choices.includes(attacker.liberties[0])) choices.unshift(attacker.liberties[0]);
+      }
+    }
+    let best = attack ? -1 : 1, legal = false;
+    for (const point of choices) {
+      if (!budget.left) return 0;
+      budget.left--;
+      const next = move(board, point, turn, path);
+      if (!next) continue;
+      legal = true;
+      path.push(next.key);
+      const outcome = read(next.board, anchor, defender, 3 - turn, depth - 1, budget, path);
+      path.pop();
+      if (attack && outcome === 1 || !attack && outcome === -1) return outcome;
+      best = attack ? Math.max(best, outcome) : Math.min(best, outcome);
+    }
+    if (!legal && !attack) {
+      // The defender may tenuki. A prohibited ko recapture is not a forced kill.
+      return read(board, anchor, defender, 3 - turn, depth - 1, budget, path);
+    }
+    return best;
+  }
+  return { inspect, move, read };
+}
+
+function readCandidate(candidate, context, reader, endangered) {
+  const { game, color, tuning } = context;
+  const next = reader.move(game.board, candidate.index, color, []);
+  if (!next) return -Infinity;
+  const board = next.board, enemy = 3 - color;
+  const path = [next.key], budget = { left: tuning.nodes };
+  const own = reader.inspect(board, candidate.index);
+  let value = candidate.score - candidate.counterPriority;
+  if (own.liberties.length <= 2) {
+    const risk = reader.read(board, candidate.index, color, enemy, tuning.depth, budget, path);
+    if (risk === 1) value -= 34 * own.stones.length + 12;
+    else if (risk === 0) value -= (own.liberties.length === 1 ? 12 : 3) * Math.min(own.stones.length, 5);
+  }
+
+  // A countercapture may free a threatened chain even when the move does not touch that chain.
+  if (candidate.captured) for (const original of endangered) {
+    const anchor = original.stones[0];
+    if (own.stones.includes(anchor)) continue;
+    const rescued = reader.inspect(board, anchor);
+    if (rescued.liberties.length < 2) continue;
+    const risk = rescued.liberties.length > 2 ? -1 : reader.read(board, anchor, color, enemy, tuning.depth, budget, path);
+    if (risk !== 1) value += (risk === -1 ? 18 : 11) * original.stones.length;
+  }
+
+  const replyPoints = new Map();
+  for (const target of candidate.newAtaris) {
+    const anchor = target.stones[0];
+    if (board[anchor] !== enemy) continue;
+    const current = reader.inspect(board, anchor);
+    if (current.liberties.length !== 1) continue;
+    const liberty = current.liberties[0];
+    replyPoints.set(liberty, (replyPoints.get(liberty) ?? 0) + target.stones.length);
+    const trapped = reader.read(board, anchor, enemy, enemy, tuning.depth, budget, path);
+    if (trapped === 1) value += 18 * target.stones.length;
+    if (trapped === -1) value -= 2.5 * Math.min(target.stones.length, 5);
+  }
+  if (replyPoints.size > 1 && own.liberties.length >= 2) {
+    const prizes = [...replyPoints.values()].sort((a, b) => b - a);
+    value += 18 * prizes[1];
+  }
+  return value;
 }
 
 export function chooseBotAction(game, difficulty = 'normal', rng = Math.random) {
   const color = game.turn;
   if (game.phase === 'finished') fail('finished', '이미 종료된 대국입니다.');
-  if (game.phase === 'scoring') {
-    // Disputed bot stones stay on the board. The players can resume to settle them by capture.
-    const disputed = game.dead.find(point => game.board[point] === color);
-    if (disputed !== undefined) return { type: 'markDead', x: disputed % game.size, y: Math.floor(disputed / game.size) };
-    return { type: 'confirmScore' };
-  }
+  if (game.phase === 'scoring') return botScoreVote(game, color);
   const tally = areaScore(game);
-  if (game.passes && tally.winner === color) return { type: 'pass' };
   const adjacent = neighbors(game.size);
+  const groups = groupMap(game.board, adjacent);
+  const tuning = Object.hasOwn(searchLevels, difficulty) ? searchLevels[difficulty] : searchLevels.normal;
+  const opening = game.moveNumber < game.size * 2;
+  const endangered = [...new Set(groups)].filter(g => g?.color === color && g.liberties.size === 1);
+  const counterPriority = new Float64Array(game.board.length);
+  for (const group of endangered) {
+    const counters = new Set();
+    for (const stone of group.stones) for (const neighbor of adjacent[stone]) {
+      const opponent = groups[neighbor];
+      if (opponent?.color !== 3 - color || opponent.liberties.size !== 1) continue;
+      const liberty = opponent.liberties.values().next().value;
+      if (!group.liberties.has(liberty)) counters.add(liberty);
+    }
+    for (const point of counters) counterPriority[point] += 16 * group.stones.length;
+  }
   const context = {
-    game, color, adjacent, groups: groupMap(game.board, adjacent),
+    game, color, adjacent, groups, opening, tuning, rng, counterPriority,
     myDistance: distanceTo(game.board, adjacent, color), enemyDistance: distanceTo(game.board, adjacent, 3 - color),
-    ownership: tally.territory, level: difficulty === 'easy' ? 0 : difficulty === 'hard' ? 2 : 1, rng,
+    ownership: tally.territory,
   };
   const candidates = [];
   for (let index = 0; index < game.board.length; index++) {
@@ -264,13 +497,15 @@ export function chooseBotAction(game, difficulty = 'normal', rng = Math.random) 
     if (move) candidates.push(move);
   }
   candidates.sort((a, b) => b.score - a.score);
-  for (const move of candidates) {
-    try {
-      applyAction(game, color, move.action);
-      return move.action;
-    } catch (error) {
-      if (error.code !== 'superko' && error.code !== 'suicide') throw error;
-    }
+  const reader = tacticalReader(game, adjacent);
+  let best = -Infinity, choice = null, examined = 0;
+  for (const candidate of candidates) {
+    const value = readCandidate(candidate, context, reader, endangered);
+    if (value === -Infinity) continue;
+    if (value > best) { best = value; choice = candidate; }
+    if (++examined >= tuning.width && (best >= 0 || examined >= 2 * tuning.width)) break;
   }
-  return { type: 'pass' };
+  // Empty regions shared by both sides can still hide unsettled groups. An opening pass is never a score estimate.
+  if (!choice || best < -3 || (game.passes && !opening && tally.winner === color && !choice.captured && !choice.saved)) return { type: 'pass' };
+  return { type: 'play', x: choice.index % game.size, y: Math.floor(choice.index / game.size) };
 }

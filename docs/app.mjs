@@ -1,4 +1,4 @@
-import { createGame, applyAction, chooseBotAction, areaScore } from './go.mjs';
+import { createGame, applyAction, chooseBotAction, areaScore } from './go.mjs?v=8ebc0161';
 import { createBoard, coordinate } from './board.mjs';
 import { createConnection } from './connection.mjs';
 
