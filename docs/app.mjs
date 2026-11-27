@@ -1,5 +1,5 @@
-import { createGame, applyAction, chooseBotAction, scoreGame } from './go.mjs?v=score1';
-import { createBoard } from './board.mjs?v=score1';
+import { createGame, applyAction, chooseBotAction, scoreGame } from './go.mjs?v=deadreview1';
+import { createBoard } from './board.mjs?v=deadreview1';
 import { createConnection } from './connection.mjs';
 
 const $ = id => document.getElementById(id);
@@ -66,11 +66,15 @@ function scoreFor(room){
 }
 function show(room,playSound=true){
   const game=room.game, last=game?.lastMove;
+  if(room.matchId===viewed.matchId && viewed.game?.phase==='scoring' && game?.phase==='playing'
+    && last?.type==='resume' && room.mode!=='friend' && last.color!==room.you){
+    notify('봇이 사석 판정에 동의하지 않아 대국을 재개했습니다.');
+  }
   if(room.matchId!==viewed.matchId || game?.phase!=='scoring')reviewFeedback='';
   else if(room.revision!==viewed.revision && last?.type==='markDead'){
     const point=last.y*game.size+last.x;
-    if(room.mode!=='friend' && last.color!==room.you && !game.dead.includes(point)){
-      reviewFeedback='봇이 사석 표시를 해제했습니다. 이견은 대국 재개로 해결하세요.';
+    if(room.mode!=='friend' && last.color!==room.you){
+      reviewFeedback=game.dead.includes(point)?'봇이 사석 후보를 추가했습니다.':'봇이 사석 표시를 해제했습니다. 이견은 대국 재개로 확인하세요.';
     }else if(viewed.game?.confirmed?.length){
       reviewFeedback='사석 표시 변경 · 양측 동의 초기화';
     }else reviewFeedback='';
@@ -148,16 +152,34 @@ function showScoreRow(side,color,game,preview,visible){
   vote.classList.toggle('agreed',agreed);
   vote.setAttribute('aria-label',stoneName(color)+' '+vote.textContent);
   const sideScore=preview.breakdown[color];
+  const deadLabel=reviewing?'사석 후보':'확정 사석';
   const terms=preview.rule==='territory-v1'
-    ? ['집 '+sideScore.territory,'따낸 돌 '+sideScore.captures,'판 위 사석 '+sideScore.dead]
+    ? ['집 '+sideScore.territory,'따낸 돌 '+sideScore.captures,deadLabel+' '+sideScore.dead]
     : ['집 '+sideScore.territory,'산 돌 '+sideScore.stones];
   if(sideScore.komi)terms.push('덤 '+sideScore.komi);
   parts.textContent=terms.join(' + ');
   if(preview.rule==='territory-v1'){
     const opponent=stoneName(3-color);
-    parts.title='따낸 돌은 대국 중 잡은 '+opponent+'돌, 판 위 사석은 계가 때 표시한 '+opponent+'돌입니다.';
-    parts.setAttribute('aria-label',stoneName(color)+'의 집 '+sideScore.territory+'집, 대국 중 따낸 '+opponent+'돌 '+sideScore.captures+'개, 판 위의 '+opponent+' 사석 '+sideScore.dead+'개, 덤 '+sideScore.komi+'집');
+    parts.title='따낸 돌은 대국 중 잡은 '+opponent+'돌, '+deadLabel+'은 계가 때 표시한 '+opponent+'돌입니다.';
+    parts.setAttribute('aria-label',stoneName(color)+'의 집 '+sideScore.territory+'집, 대국 중 따낸 '+opponent+'돌 '+sideScore.captures+'개, 판 위의 '+opponent+' '+deadLabel+' '+sideScore.dead+'개, 덤 '+sideScore.komi+'집');
   }else{parts.removeAttribute('title');parts.removeAttribute('aria-label');}
+}
+function showDeadLegend(game){
+  const legend=$('deadLegend');
+  if(game?.phase!=='scoring' || game.scoringRule!=='territory-v1' || !Array.isArray(game.suggestedDead)){
+    legend.hidden=true;
+    return false;
+  }
+  const selected=new Set(game.dead);
+  let automatic=0;
+  for(const point of game.suggestedDead)if(selected.has(point))automatic++;
+  const excluded=game.suggestedDead.length-automatic, added=selected.size-automatic;
+  for(const [id,count] of [['autoMarks',automatic],['editedMarks',added],['excludedMarks',excluded]]){
+    $(id).hidden=count===0;
+    $(id).querySelector('b').textContent=String(count);
+  }
+  legend.hidden=!(automatic || added || excluded);
+  return !legend.hidden;
 }
 function render(){
   const g=viewed.game, offline=viewed.mode==='practice', waiting=!g;
@@ -194,14 +216,20 @@ function render(){
   $('rematch').hidden=g?.phase!=='finished';$('rematch').disabled=blocked||viewed.rematch.includes(mine);
   $('rematch').textContent=offline?'다시 두기':viewed.rematch.includes(mine)?'상대의 재대전 동의를 기다리는 중':'재대전 신청';
   let note='';
-  if(reviewing)note=reviewFeedback || (tally.needsReview?'열린 경계를 확인하고 사석을 표시하세요.':'돌을 눌러 사석 표시를 바꾸세요.');
+  const hasLegend=showDeadLegend(g);
+  if(reviewing){
+    if(reviewFeedback)note=reviewFeedback;
+    else if(hasLegend)note='무리를 눌러 후보를 바꿀 수 있습니다.';
+    else if(Array.isArray(g.suggestedDead) && tally.rule==='territory-v1')note='자동 후보 없음 · 사석은 눌러 표시하세요.';
+    else note=tally.needsReview?'열린 경계를 확인하고 사석을 표시하세요.':'돌을 눌러 사석 표시를 바꾸세요.';
+  }
   if(g?.phase==='finished'){
     const record=profile?.history?.find(entry=>entry.matchId===viewed.matchId);
     const total=settledParts?'집 계가 확정':g.result.reason==='score'?ruleLabel+' · 흑 '+g.result.black+'집 · 백 '+g.result.white+'집':'';
     const coins=record?(record.delta>0?'+':'')+record.delta+'코인':'';
     note=[total,coins].filter(Boolean).join(' · ');
   }
-  $('phaseNote').textContent=note;$('phaseNote').hidden=!note;
+  $('phaseMessage').textContent=note;$('phaseNote').hidden=!note&&!hasLegend;
   $('roomStrip').hidden=viewed.mode!=='friend';$('roomCode').textContent=viewed.mode==='friend'?viewed.code:'';
   $('copyRoom').disabled=onlineDown;
   board(g||waitingBoard,tally?.territory);

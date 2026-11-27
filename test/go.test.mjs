@@ -130,9 +130,10 @@ test('all bot levels produce legal moves, capture urgent stones, and can decline
 test('scoring bot accepts a trapped group but disputes a group saved by countercapture', () => {
   function propose(actions) {
     const scoring = sequence([...actions, pass, pass]);
-    return applyAction(scoring, 2, mark(0, 0));
+    return scoring.dead.includes(0) ? { ...scoring, turn: 1 } : applyAction(scoring, 2, mark(0, 0));
   }
   const trapped = propose([play(0, 0), play(1, 0), play(8, 8), play(1, 1), play(7, 8), play(0, 2)]);
+  assert.ok(trapped.dead.includes(0));
   assert.deepEqual(chooseBotAction(trapped, 'normal'), confirm);
   const countercapture = propose([play(0, 0), play(1, 0), play(2, 0), play(0, 2), play(8, 8), play(1, 2)]);
   assert.deepEqual(chooseBotAction(countercapture, 'hard'), mark(0, 0));

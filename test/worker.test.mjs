@@ -34,9 +34,10 @@ async function database() {
   };
 }
 
-test('D1 transport preserves ordered state, private profiles, command replay and concurrent settlement', async () => {
+async function httpSession(t) {
   const db = await database();
   const tasks = [];
+  t.after(async () => { await Promise.all(tasks); db.sqlite.close(); });
   const ctx = { waitUntil: task => tasks.push(task) };
   async function invoke(path, payload, token) {
     const headers = token ? { Authorization: 'Bearer ' + token } : {};
@@ -47,6 +48,12 @@ test('D1 transport preserves ordered state, private profiles, command replay and
     const response = await handleRequest(request, { DB: db }, ctx);
     return { status: response.status, data: await response.json() };
   }
+  const command = (token, op, fields, id = crypto.randomUUID()) => invoke('/api/command', { type: 'command', id, op, ...fields }, token);
+  return { db, invoke, command };
+}
+
+test('D1 transport preserves ordered state, private profiles, command replay and concurrent settlement', async t => {
+  const { db, invoke, command } = await httpSession(t);
   const health = await invoke('/health');
   assert.equal(health.data.ok, true);
   const [a, b] = await Promise.all([
@@ -56,7 +63,6 @@ test('D1 transport preserves ordered state, private profiles, command replay and
   assert.equal(a.status, 200);
   assert.equal(b.status, 200);
   const tokenA = a.data.token, tokenB = b.data.token;
-  const command = (token, op, fields, id = crypto.randomUUID()) => invoke('/api/command', { type: 'command', id, op, ...fields }, token);
   const made = await command(tokenA, 'create', { size: 19, mode: 'friend' });
   assert.equal(made.status, 200);
   const code = made.data.events[0].room.code;
@@ -114,7 +120,42 @@ test('D1 transport preserves ordered state, private profiles, command replay and
   assert.deepEqual([summary.room.game.result.black, summary.room.game.result.white], [0, 6.5]);
   assert.equal(summary.profile.history.filter(row => row.matchId === proposal.matchId).length, 1);
   assert.equal(summary.profile.coins, 175);
-  await Promise.all(tasks);
-  db.sqlite.close();
+});
+
+test('the D1 outbox and reconnect return the same initial dead proposal and its later manual correction', async t => {
+  const { invoke, command } = await httpSession(t);
+  const a = (await invoke('/api/hello', { type: 'hello', name: '흑' })).data;
+  const b = (await invoke('/api/hello', { type: 'hello', name: '백' })).data;
+  const waiting = await command(a.token, 'create', { mode: 'friend' });
+  const code = waiting.data.events[0].room.code;
+  const joined = await command(b.token, 'join', { code });
+  let room = joined.data.events[0].room;
+  // Two connected corner stones share one liberty, which cannot be used to escape.
+  const moves = [[0,0], [1,0], [0,1], [1,1], [18,18], [1,2], [17,18], [0,3]];
+  for (const [index, coordinates] of [...moves, null, null].entries()) {
+    const action = coordinates ? { type: 'play', x: coordinates[0], y: coordinates[1] } : { type: 'pass' };
+    const res = await command(index % 2 ? b.token : a.token, 'action', { code, matchId: room.matchId, revision: room.revision, action });
+    assert.equal(res.status, 200);
+    room = res.data.events[0].room;
+  }
+  const events = await invoke('/api/events?wait=0&after=' + a.cursor, undefined, a.token);
+  const last = events.data.events.at(-1).room;
+  assert.deepEqual(last.game.suggestedDead, [0, 19]);
+  assert.deepEqual(last.game.dead, [0, 19]);
+  assert.deepEqual(last.scorePreview, room.scorePreview);
+  assert.equal(last.scorePreview.breakdown[2].dead, 2);
+  const fields = { code, matchId: room.matchId, revision: room.revision, action: { type: 'markDead', x: 0, y: 1 } };
+  const id = crypto.randomUUID();
+  const edits = await Promise.all([command(a.token, 'action', fields, id), command(a.token, 'action', fields, id)]);
+  assert.ok(edits.every(result => result.status === 200));
+  for (const token of [a.token, b.token]) {
+    const restored = (await invoke('/api/hello', { type: 'hello', token })).data;
+    assert.equal(restored.room.revision, room.revision + 1);
+    assert.deepEqual(restored.room.game.suggestedDead, [0, 19]);
+    assert.deepEqual(restored.room.game.dead, []);
+    assert.equal(restored.room.scorePreview.breakdown[2].dead, 0);
+    assert.equal(restored.profile.history.length, 0);
+    assert.equal(restored.profile.coins, 100);
+  }
 });
 

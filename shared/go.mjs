@@ -241,72 +241,180 @@ export function scoreGame(game) {
   return { rule, black, white, winner: black > white ? 1 : 2, margin: Math.abs(black - white), territory, breakdown, needsReview, proposalKey: proposalKey(game, rule) };
 }
 
-function botScoreVote(game, color) {
+function hasTwoPrivateEyes(group, groups, adjacent) {
+  let eyes = 0;
+  for (const liberty of group.liberties) {
+    if (adjacent[liberty].every(n => groups[n] === group) && ++eyes === 2) return true;
+  }
+  return false;
+}
+
+// A suggestion is a conservative local capture proof. Unknowns remain on the
+// board for the players to mark; the reader never changes the game or its prisoners.
+function detectDeadStones(game) {
   const adjacent = neighbors(game.size);
-  const checked = new Set();
-  let reader;
-  function tryPlay(position, player, point) {
-    try {
-      return playStone(position, player, { x: point % game.size, y: Math.floor(point / game.size) });
-    } catch (error) {
-      if (error.code === 'suicide' || error.code === 'superko') return null;
-      throw error;
-    }
+  const groups = groupMap(game.board, adjacent);
+  const reader = tacticalReader(game, adjacent);
+  const result = [];
+  const oldColors = new Map();
+  const unresolved = Symbol('unresolved');
+  let totalNodes = 300, groupNodes = 160;
+
+  function trial(board, point, color, path) {
+    if (groupNodes <= 0 || totalNodes <= 0) throw unresolved;
+    groupNodes--; totalNodes--;
+    const status = {};
+    const next = reader.move(board, point, color, path, status);
+    // A ko ban may change after a threat elsewhere. Do not adjudicate such lines.
+    if (status.ko) throw unresolved;
+    return next;
   }
-  function canTakeCleanly(position, stone, group, defender) {
-    if (group.liberties.size !== 1) return false;
-    const liberty = group.liberties.values().next().value;
-    const after = tryPlay(position, 3 - defender, liberty);
-    // A ko or snapback still has to be resolved on the board.
-    return after !== null && after.board[stone] === 0 && chain(after.board, adjacent, liberty).liberties.size > 1;
+  function neverHeldAttacker(point, attacker) {
+    if (!game.captures[1] && !game.captures[2]) return true;
+    if (!oldColors.has(point)) {
+      const digit = Math.floor(point / 3), divisor = 3 ** (point % 3);
+      let colors = 0;
+      for (const key of game.history) {
+        const code = key.charCodeAt(digit) - 65;
+        if (!(code >= 0 && code < 27)) { colors = 3; break; }
+        colors |= Math.floor(code / divisor) % 3;
+        if (colors === 3) break;
+      }
+      oldColors.set(point, colors);
+    }
+    return (oldColors.get(point) & attacker) === 0;
   }
-  function enclosed(group, defender) {
-    const pocket = new Set([...group.stones, ...group.liberties]), wall = new Set();
-    for (const point of pocket) for (const neighbor of adjacent[point]) {
-      if (pocket.has(neighbor) || wall.has(neighbor)) continue;
-      if (game.board[neighbor] !== 3 - defender) return false;
-      const enclosing = chain(game.board, adjacent, neighbor);
-      // A weak surrounding wall can be threatened by a move outside the pocket.
-      if ([...enclosing.liberties].filter(liberty => !pocket.has(liberty)).length < 3) return false;
-      for (const member of enclosing.stones) wall.add(member);
-    }
-    return wall.size > 0;
+  function cleanAtari(board, anchor, liberties, defender, path) {
+    if (liberties.length !== 1) return false;
+    const point = liberties[0], taken = trial(board, point, 3 - defender, path);
+    return taken !== null && !taken.board[anchor] && reader.inspect(taken.board, point).liberties.length > 1;
   }
-  function provenDead(stone, group, defender) {
-    if (group.liberties.size === 2 && game.scoringRule === 'territory-v1' && enclosed(group, defender)) {
-      reader ??= tacticalReader(game, adjacent);
-      // Require a clean forced capture even if the surrounded player moves first.
-      // A ko, a snapback or a line we cannot resolve is never proof of death.
-      return [defender, 3 - defender].every(turn => reader.read(game.board, stone, defender, turn, 8, { left: 56 }, [], true) === 1);
+  function lostAtari(group) {
+    const defender = group.color, anchor = group.stones[0];
+    const lastLiberty = group.liberties.values().next().value;
+    const capture = trial(game.board, lastLiberty, 3 - defender, []);
+    if (!capture || capture.board[anchor]) return false;
+    const captureLiberties = reader.inspect(capture.board, lastLiberty).liberties;
+    if (captureLiberties.length < 2) return false;
+    const defenses = new Set(group.liberties);
+    // An outside move can reduce a two-liberty capturing chain to one. Include
+    // it even when it is neither an extension nor an adjacent countercapture.
+    if (captureLiberties.length === 2) {
+      for (const point of captureLiberties) if (!game.board[point]) defenses.add(point);
     }
-    if (!canTakeCleanly(game, stone, group, defender)) return false;
-    const defenses = new Set(group.liberties), examinedEnemies = new Set();
-    for (const member of group.stones) for (const point of adjacent[member]) {
-      if (game.board[point] !== 3 - defender || examinedEnemies.has(point)) continue;
-      const enemy = chain(game.board, adjacent, point);
-      for (const enemyStone of enemy.stones) examinedEnemies.add(enemyStone);
-      if (enemy.liberties.size === 1) defenses.add(enemy.liberties.values().next().value);
+    for (const stone of group.stones) for (const n of adjacent[stone]) {
+      const enemy = groups[n];
+      if (enemy?.color === 3 - defender && enemy.liberties.size === 1) defenses.add(enemy.liberties.values().next().value);
     }
-    for (const defense of defenses) {
-      const after = tryPlay(game, defender, defense);
-      if (after && !canTakeCleanly(after, stone, chain(after.board, adjacent, stone), defender)) return false;
+    for (const point of defenses) {
+      const after = trial(game.board, point, defender, []);
+      if (after && !cleanAtari(after.board, anchor, reader.inspect(after.board, anchor).liberties, defender, [after.key])) return false;
     }
     return true;
   }
-  for (const stone of game.dead) {
-    if (game.board[stone] !== color || checked.has(stone)) continue;
-    const group = chain(game.board, adjacent, stone);
-    for (const member of group.stones) checked.add(member);
-    if (!provenDead(stone, group, color)) return { type: 'markDead', x: stone % game.size, y: Math.floor(stone / game.size) };
+  function enclosedPocket(group) {
+    // Read only physically closed pockets containing a single defending chain.
+    // A gap leading out or a possible connection to another friendly chain leaves
+    // the position for human review. Board edges may form part of the enclosure.
+    const pocket = new Set(group.liberties), walls = new Set();
+    const queue = [...group.stones, ...pocket];
+    for (let i = 0; i < queue.length; i++) for (const n of adjacent[queue[i]]) {
+      const neighbor = groups[n];
+      if (!neighbor) {
+        if (pocket.has(n)) continue;
+        pocket.add(n);
+        if (pocket.size > Math.max(6, group.liberties.size)) return null;
+        queue.push(n);
+      } else if (neighbor.color === group.color) {
+        if (neighbor !== group) return null;
+      } else {
+        walls.add(neighbor);
+      }
+    }
+    for (const wall of walls) {
+      let outside = 0;
+      for (const liberty of wall.liberties) if (!pocket.has(liberty)) outside++;
+      // If every defense were played outside, the wall still needs to survive the
+      // whole proof. Two unconditional private eyes also suffice.
+      if (outside <= pocket.size && !hasTwoPrivateEyes(wall, groups, adjacent)) return null;
+    }
+    return walls.size ? [...pocket] : null;
+  }
+  function lostPocket(group, pocket) {
+    const defender = group.color, anchor = group.stones[0], path = [];
+    function forced(board, turn, attacksLeft) {
+      if (!attacksLeft) return false;
+      const attack = turn !== defender;
+      // A defender can tenuki, including reducing an outside liberty. The wall
+      // check above provides an outside-liberty reserve for each allowed attack.
+      if (!attack && !forced(board, 3 - turn, attacksLeft)) return false;
+      for (const point of pocket) {
+        if (board[point]) continue;
+        const next = trial(board, point, turn, path);
+        if (!next) continue;
+        let caught;
+        if (!next.board[anchor]) {
+          caught = reader.inspect(next.board, point).liberties.length > 1;
+        } else {
+          path.push(next.key);
+          caught = forced(next.board, 3 - turn, attacksLeft - (attack ? 1 : 0));
+          path.pop();
+        }
+        if (attack && caught) return true;
+        if (!attack && !caught) return false;
+      }
+      return !attack;
+    }
+    return forced(game.board, defender, pocket.length);
+  }
+
+  const chains = [...new Set(groups)].filter(Boolean).sort((a, b) => a.liberties.size - b.liberties.size);
+  for (const group of chains) {
+    if (hasTwoPrivateEyes(group, groups, adjacent)) continue;
+    const touchesWall = point => adjacent[point].some(n => game.board[n] === 3 - group.color);
+    if (group.liberties.size > 6 && ![...group.liberties].every(touchesWall)) continue;
+    groupNodes = 160;
+    try {
+      let lost = false;
+      if (group.liberties.size === 1) {
+        if (totalNodes) lost = lostAtari(group);
+      } else if (game.scoringRule === 'territory-v1') {
+        const pocket = enclosedPocket(group);
+        if (pocket) {
+          // If every empty intersection is a liberty of the target AND directly
+          // touches a safe wall, every defense fills a liberty and every attack
+          // connects to the wall. No eye or countercapture can arise. The first
+          // attack occupies a point never previously owned by the attacker, so
+          // these monotonically filling lines cannot repeat a historic position.
+          lost = pocket.length === group.liberties.size && pocket.every(p => touchesWall(p) && neverHeldAttacker(p, 3 - group.color));
+          if (!lost && pocket.length <= 6 && totalNodes) lost = lostPocket(group, pocket);
+        }
+      }
+      if (lost) result.push(...group.stones);
+    } catch (error) {
+      if (error !== unresolved) throw error;
+    }
+  }
+  return result.sort((a, b) => a - b);
+}
+
+function botScoreVote(game, color) {
+  // The board is immutable through this scoring round. Reuse its evidence when
+  // evaluating a player's edits; restored older scoring snapshots may lack it.
+  const proved = new Set(game.scoringRule === 'territory-v1' && Array.isArray(game.suggestedDead) ? game.suggestedDead : detectDeadStones(game));
+  const active = new Set(game.dead);
+  let groups;
+  const adjacent = neighbors(game.size);
+  for (const stone of active) {
+    if (proved.has(stone)) continue;
+    groups ??= groupMap(game.board, adjacent);
+    if (game.board[stone] === color || (groups[stone] && hasTwoPrivateEyes(groups[stone], groups, adjacent))) {
+      return { type: 'markDead', x: stone % game.size, y: Math.floor(stone / game.size) };
+    }
   }
   if (game.scoringRule === 'territory-v1') {
-    const marks = new Set(game.dead);
-    for (let stone = 0; stone < game.board.length; stone++) {
-      if (game.board[stone] !== 3 - color || checked.has(stone)) continue;
-      const group = chain(game.board, adjacent, stone);
-      for (const member of group.stones) checked.add(member);
-      // Unmarked opponent stones remain live. Resolve a proven capture by playing it out.
-      if (!marks.has(stone) && provenDead(stone, group, 3 - color)) return { type: 'resume' };
+    for (const stone of proved) {
+      if (game.board[stone] === 3 - color && !active.has(stone)) return { type: 'resume' };
     }
   }
   return { type: 'confirmScore' };
@@ -315,7 +423,7 @@ function botScoreVote(game, color) {
 function scoringAction(game, color, action, scorePreview) {
   const lastMove = { type: action.type, color };
   if (action.type === 'resume') {
-    return { ...game, phase: 'playing', passes: 0, turn: game.resumeTurn, resumeTurn: null, dead: [], confirmed: [], lastMove };
+    return { ...game, phase: 'playing', passes: 0, turn: game.resumeTurn, resumeTurn: null, dead: [], suggestedDead: [], confirmed: [], lastMove };
   }
   if (action.type === 'markDead') {
     const start = actionPoint(game, action);
@@ -357,7 +465,12 @@ export function applyAction(game, color, action, scorePreview) {
   if (action.type === 'pass') {
     const passes = game.passes + 1;
     const turn = 3 - color;
-    return { ...game, passes, turn, moveNumber: game.moveNumber + 1, lastMove: { type: 'pass', color }, phase: passes === 2 ? 'scoring' : 'playing', resumeTurn: passes === 2 ? turn : null };
+    const next = { ...game, passes, turn, moveNumber: game.moveNumber + 1, lastMove: { type: 'pass', color }, phase: passes === 2 ? 'scoring' : 'playing', resumeTurn: passes === 2 ? turn : null };
+    if (passes === 2 && game.scoringRule === 'territory-v1') {
+      const suggestedDead = detectDeadStones(game);
+      return { ...next, suggestedDead, dead: [...suggestedDead], confirmed: [] };
+    }
+    return next;
   }
   fail('action', '지금은 사용할 수 없는 대국 명령입니다.');
 }
@@ -503,7 +616,7 @@ function tacticalReader(game, adjacent) {
     return { stones, liberties };
   }
 
-  function move(board, point, color, path) {
+  function move(board, point, color, path, status) {
     if (board[point]) return null;
     const next = board.slice();
     next[point] = color;
@@ -514,7 +627,10 @@ function tacticalReader(game, adjacent) {
     }
     if (!adjacent[point].some(n => !next[n]) && !inspect(next, point).liberties.length) return null;
     const key = positionKey(next);
-    if (previous.has(key) || path.includes(key)) return null;
+    if (previous.has(key) || path.includes(key)) {
+      if (status) status.ko = true;
+      return null;
+    }
     return { board: next, key };
   }
 

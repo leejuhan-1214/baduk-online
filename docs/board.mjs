@@ -66,6 +66,8 @@ export function createBoard(canvas, select, canSelect) {
     const { at, gap, scale } = geometry, radius = gap * .467;
     context.setTransform(1, 0, 0, 1, 0, 0); context.drawImage(backdrop, 0, 0); context.scale(scale, scale);
     const dead = new Set(game.dead || []), reviewing = game.phase === 'scoring', finishedScore = game.result?.reason === 'score';
+    const suggested = reviewing && game.scoringRule === 'territory-v1' && Array.isArray(game.suggestedDead)
+      ? new Set(game.suggestedDead) : null;
     game.board.forEach((color, index) => {
       const px=at(index%game.size), py=at(Math.floor(index/game.size));
       const markedDead = dead.has(index);
@@ -78,7 +80,16 @@ export function createBoard(canvas, select, canSelect) {
         }
       }
       if (markedDead && reviewing) {
-        const r=radius*.33;context.strokeStyle='#9a332a';context.lineWidth=Math.max(1.4,radius*.13);context.beginPath();context.moveTo(px-r,py-r);context.lineTo(px+r,py+r);context.moveTo(px-r,py+r);context.lineTo(px+r,py-r);context.stroke();
+        const r=radius*.30;
+        context.strokeStyle='#9a332a';context.lineWidth=Math.max(1.3,radius*.12);
+        context.beginPath();context.moveTo(px-r,py-r);context.lineTo(px+r,py+r);context.moveTo(px-r,py+r);context.lineTo(px+r,py-r);context.stroke();
+        if(suggested && !suggested.has(index)){
+          context.beginPath();context.arc(px,py,radius*.58,0,Math.PI*2);context.stroke();
+        }
+      } else if(color && suggested?.has(index)){
+        context.save();context.lineWidth=Math.max(1.35,radius*.12);
+        context.strokeStyle=color===1?'#f7d98d':'#865d20';context.setLineDash([Math.max(1.2,radius*.22),Math.max(1.3,radius*.2)]);
+        context.beginPath();context.arc(px,py,radius*.57,0,Math.PI*2);context.stroke();context.restore();
       }
     });
     const last = game.lastMove;

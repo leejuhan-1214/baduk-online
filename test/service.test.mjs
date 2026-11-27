@@ -16,6 +16,9 @@ function action(service, account, type, fields = {}, id) {
   return roomCommand(service, account, 'action', { action: { type, ...vote, ...fields } }, id);
 }
 
+// The black corner stone at (0,0) cannot extend at (0,1) or capture a white wall.
+const trappedCornerMoves = [[0,0], [1,0], [18,18], [1,1], [17,18], [0,2]];
+
 test('new rooms reject smaller sizes and legacy waiting rooms start on 19 lines', async () => {
   const service = createService();
   const a = await connect(service, '새 대국');
@@ -279,6 +282,109 @@ test('a consent cannot cross a dead-group edit, a resumption, or a match boundar
   send(service, b, 'rematch', sameResult);
   assert.notEqual(service.view(a.accountId).room.matchId, finished.matchId);
   assert.throws(() => send(service, a, 'rematch', sameResult), { code: 'stale_revision' });
+});
+
+test('both players can review and override the same automatic dead group before a single settlement', async () => {
+  const initial = createService();
+  const a = await connect(initial, '흑');
+  const b = await connect(initial, '백');
+  send(initial, a, 'create', { mode: 'friend' });
+  const code = initial.view(a.accountId).room.code;
+  send(initial, b, 'join', { code });
+  for (const [index, [x,y]] of trappedCornerMoves.entries()) {
+    action(initial, index % 2 ? b : a, 'play', { x, y });
+  }
+  action(initial, a, 'pass');
+  const preScore = initial.snapshot();
+  const scoring = action(initial, b, 'pass');
+  for (const { message } of scoring.updates) {
+    assert.deepEqual(message.room.game.suggestedDead, [0]);
+    assert.deepEqual(message.room.game.dead, [0]);
+    assert.deepEqual(message.room.game.confirmed, []);
+    assert.equal(message.room.game.board[0], 1);
+    assert.equal(message.room.scorePreview.breakdown[2].dead, 1);
+    assert.equal(message.room.scorePreview.breakdown[2].captures, 0);
+    assert.equal(message.profile.history.length, 0);
+  }
+  const base = initial.view(a.accountId).room;
+  const vote = { code, revision: base.revision, matchId: base.matchId, action: { type: 'confirmScore', scoringRule: base.scorePreview.rule } };
+  const scoringSnapshot = initial.snapshot();
+  const accepted = createService(scoringSnapshot);
+  send(accepted, a, 'action', vote);
+  const id = crypto.randomUUID();
+  send(accepted, b, 'action', vote, id);
+  const replay = createService(accepted.snapshot());
+  send(replay, b, 'action', vote, id);
+  assert.equal(replay.view(b.accountId).profile.history.length, 1);
+  assert.equal(replay.view(b.accountId).profile.history[0].delta, base.scorePreview.margin * 10);
+
+  send(initial, a, 'action', vote);
+  action(initial, b, 'markDead', { x: 0, y: 0 });
+  assert.throws(() => send(initial, b, 'action', vote), { code: 'stale_revision' });
+  const reopened = createService(initial.snapshot());
+  const corrected = (await reopened.hello({ type: 'hello', token: a.message.token })).message.room;
+  assert.deepEqual(corrected.game.suggestedDead, [0]);
+  assert.deepEqual(corrected.game.dead, []);
+  assert.deepEqual(corrected.game.confirmed, []);
+  assert.equal(corrected.scorePreview.breakdown[2].dead, 0);
+  assert.notEqual(base.scorePreview.proposalKey, corrected.scorePreview.proposalKey);
+  action(reopened, a, 'confirmScore');
+  action(reopened, b, 'confirmScore');
+  const final = reopened.view(b.accountId);
+  assert.equal(final.room.game.result.white, corrected.scorePreview.white);
+  assert.equal(final.profile.history.length, 1);
+  assert.equal(final.profile.history[0].delta, corrected.scorePreview.margin * 10);
+
+  // The same second pass in a legacy area game must not apply the new suggestion.
+  delete preScore.rooms[code].game.scoringRule;
+  delete preScore.rooms[code].game.suggestedDead;
+  const legacy = createService(preScore);
+  action(legacy, b, 'pass');
+  assert.deepEqual(legacy.view(a.accountId).room.game.dead, []);
+  assert.equal(legacy.view(a.accountId).room.scorePreview.rule, 'area-v1');
+});
+
+test('an unfinished pre-update review keeps its existing marks and votes during reconnect', async () => {
+  const service = createService();
+  const a = await connect(service, '기존 대국');
+  send(service, a, 'create', { mode: 'bot' });
+  const code = service.view(a.accountId).room.code;
+  const db = service.snapshot(), room = db.rooms[code];
+  for (const [x,y] of trappedCornerMoves) room.game = applyAction(room.game, room.game.turn, { type: 'play', x, y });
+  // Older territory-v1 reviews started with no suggestedDead field and could already have one vote.
+  Object.assign(room.game, { phase: 'scoring', passes: 2, resumeTurn: 1, turn: 2, dead: [], confirmed: [1] });
+  delete room.game.suggestedDead;
+  room.scorePreview = null;
+  const old = createService(db);
+  const restored = (await old.hello({ type: 'hello', token: a.message.token })).message.room;
+  assert.deepEqual(restored.game.dead, []);
+  assert.deepEqual(restored.game.confirmed, [1]);
+  assert.equal(restored.game.suggestedDead, undefined);
+  assert.equal(restored.scorePreview.breakdown[2].dead, 0);
+});
+
+test('the bot approves the initial trapped-stone proposal and plays out a disputed removal', async () => {
+  const initial = createService();
+  const a = await connect(initial, '호수');
+  send(initial, a, 'create', { mode: 'bot', difficulty: 'hard' });
+  const code = initial.view(a.accountId).room.code;
+  const db = initial.snapshot(), room = db.rooms[code];
+  for (const [x,y] of [...trappedCornerMoves, [9,9]]) room.game = applyAction(room.game, room.game.turn, { type: 'play', x, y });
+  room.game = applyAction(room.game, 2, { type: 'pass' });
+  const service = createService(db);
+  action(service, a, 'pass');
+  assert.deepEqual(service.view(a.accountId).room.game.dead, [0]);
+  service.botStep(code);
+  assert.deepEqual(service.view(a.accountId).room.game.confirmed, [2]);
+  assert.equal(service.view(a.accountId).profile.history.length, 0);
+  action(service, a, 'markDead', { x: 0, y: 0 });
+  service.botStep(code);
+  const state = service.view(a.accountId);
+  assert.equal(state.room.game.phase, 'playing');
+  assert.deepEqual(state.room.game.dead, []);
+  assert.deepEqual(state.room.game.confirmed, []);
+  assert.equal(state.room.scorePreview, null);
+  assert.equal(state.profile.history.length, 0);
 });
 
 test('third account cannot inspect a private room, move, evict players, or impersonate by name', async () => {

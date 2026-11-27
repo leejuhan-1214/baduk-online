@@ -62,7 +62,9 @@ test('a sole spanning wall does not claim broad three-edge exteriors on either s
 });
 
 test('a trapped but unmarked opponent does not make the open exterior territory', () => {
-  const position = [play(0,1), play(0,0), play(2,0), pass, play(1,1), pass, pass].reduce(next, createGame());
+  const proposed = [play(0,1), play(0,0), play(2,0), pass, play(1,1), pass, pass].reduce(next, createGame());
+  assert.deepEqual(proposed.suggestedDead, [0]);
+  const position = applyAction(proposed, 1, mark(0,0));
   const before = scoreGame(position);
   assert.deepEqual([before.black, before.white, before.needsReview], [0, 6.5, true]);
   assert.ok(before.territory.every(point => !point));
@@ -73,11 +75,11 @@ test('a trapped but unmarked opponent does not make the open exterior territory'
   assert.deepEqual(scoreGame(applyAction(marked, 2, mark(0,0))), before);
 
   const wall = Array.from({ length: 19 }, (_, x) => [x,9]);
-  const confined = scoreGame(fixture([...wall, [0,1],[2,0],[1,1]], [[0,0]]));
+  const confined = scoreGame(applyAction(fixture([...wall, [0,1],[2,0],[1,1]], [[0,0]]), 1, mark(0,0)));
   assert.deepEqual([confined.black, confined.white, confined.needsReview], [0, 6.5, true]);
   const independent = scoreGame(fixture(wall, [[8,15]]));
   assert.equal(independent.territory[index(9,4)], 1, 'an independent opponent across a complete wall preserves the ordinary side-territory ruling');
-  const pockets = scoreGame(fixture([[0,1],[2,0],[1,1], [18,1],[17,1],[16,1],[15,1],[17,0],[15,0]], [[0,0]]));
+  const pockets = scoreGame(applyAction(fixture([[0,1],[2,0],[1,1], [18,1],[17,1],[16,1],[15,1],[17,0],[15,0]], [[0,0]]), 1, mark(0,0)));
   assert.equal(pockets.black, 2);
   assert.equal(pockets.territory[index(18,0)], 1);
   assert.equal(pockets.territory[index(16,0)], 1);
@@ -85,7 +87,9 @@ test('a trapped but unmarked opponent does not make the open exterior territory'
 });
 
 test('marking, undoing and re-marking a two-stone dead chain never alters historic prisoners', () => {
-  const original = fixture([[1,0],[1,1],[4,0],[4,1],[0,2],[1,2],[2,2],[3,2],[4,2]], [[2,0],[3,0],[16,16]], { 1: 3, 2: 2 });
+  const suggested = fixture([[1,0],[1,1],[4,0],[4,1],[0,2],[1,2],[2,2],[3,2],[4,2]], [[2,0],[3,0],[16,16]], { 1: 3, 2: 2 });
+  assert.deepEqual(suggested.suggestedDead, [index(2,0), index(3,0)]);
+  const original = applyAction(suggested, 1, mark(2,0));
   const originalScore = scoreGame(original);
   const firstVote = applyAction(original, 1, confirm);
   const marked = applyAction(firstVote, 2, mark(2,0));
@@ -146,12 +150,12 @@ test('old and new matches keep their own scoring and reject confirmations for a 
 
 test('bot accepts an enclosed two-liberty dead stone and leaves uncertain stones to the players', () => {
   const enclosed = fixture([[0,0]], [[2,0],[1,1],[0,2],[2,1],[1,2]]);
-  const marked = applyAction(enclosed, 2, mark(0,0));
-  assert.deepEqual(chooseBotAction(marked), { type: 'confirmScore' });
-  const pair = applyAction(fixture([[0,0],[1,0]], [[2,0],[2,1],[0,2],[1,2],[2,2]]), 2, mark(1,0));
+  assert.deepEqual(enclosed.suggestedDead, [index(0,0)]);
+  assert.deepEqual(chooseBotAction({ ...enclosed, turn: 1 }), { type: 'confirmScore' });
+  const pair = fixture([[0,0],[1,0]], [[2,0],[2,1],[0,2],[1,2],[2,2]]);
   assert.deepEqual(pair.dead, [index(0,0), index(1,0)]);
   assert.deepEqual(chooseBotAction(pair), { type: 'confirmScore' });
-  assert.deepEqual(chooseBotAction({ ...enclosed, turn: 2 }), { type: 'resume' });
+  assert.deepEqual(chooseBotAction(applyAction(enclosed, 1, mark(0,0))), { type: 'resume' });
   const unsettled = fixture([[0,0]], [[16,16]]);
   assert.deepEqual(chooseBotAction(applyAction(unsettled, 2, mark(0,0))), mark(0,0));
   const ko = [play(2,0), play(1,0), play(1,1), play(0,1), play(0,0), pass, pass].reduce(next, createGame());
